@@ -2,7 +2,7 @@ import pytest
 
 import app.cli as cli
 from app.cli import run_pipeline
-from app.models import ScrapedItem
+from app.models import KworkCategory, ScrapedItem
 
 
 def test_run_pipeline_uses_mocks_without_network_or_real_db(mocker):
@@ -65,6 +65,38 @@ def test_main_exports_without_url(mocker, capsys):
     output = capsys.readouterr().out
     assert "Генерация отчета по накопленной базе..." in output
     assert "Отчет сохранен: data/reports/report_test.csv" in output
+
+
+def test_collect_kwork_saves_categories_and_items(mocker):
+    category = KworkCategory(
+        category_name="Kwork",
+        url="https://kwork.ru/categories/test",
+        parse_status="success",
+    )
+    item = ScrapedItem(
+        source="kwork",
+        url="https://kwork.ru/kwork/1",
+        title="Kwork item",
+        parse_status="success",
+    )
+
+    mocker.patch("app.cli.init_db")
+    collect_catalog_mock = mocker.patch(
+        "app.cli.collect_kwork_catalog",
+        return_value=([category], [item]),
+    )
+    save_kwork_category_mock = mocker.patch("app.cli.save_kwork_category")
+    save_scraped_item_mock = mocker.patch("app.cli.save_scraped_item")
+
+    saved = cli.collect_kwork(force=True)
+
+    assert saved == 1
+    collect_catalog_mock.assert_called_once_with(
+        force=True,
+        limit=cli.config.MAX_PAGES_PER_RUN,
+    )
+    save_kwork_category_mock.assert_called_once_with(category)
+    save_scraped_item_mock.assert_called_once_with(item)
 
 
 def test_main_errors_without_url_or_export(mocker):

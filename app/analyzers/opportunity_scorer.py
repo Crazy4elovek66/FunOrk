@@ -1,11 +1,15 @@
-"""Расчет маржи и итогового скоринга возможностей."""
+"""Расчет скоринга и итоговой бизнес-модели Opportunity."""
 
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_HALF_UP
+import re
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from app.config import config
+from app.analyzers.margin_calculator import (
+    calculate_margin_percent,
+    calculate_sell_price,
+)
 from app.models import Opportunity, RiskLevel, ScrapedItem
 from app.rules.loader import load_scoring_rules
 
@@ -16,18 +20,21 @@ def score_opportunity(
     risk_reason: str,
     mapping_data: dict[str, Any] | None,
 ) -> Opportunity:
-    """Создает бизнес-модель Opportunity с учетом комиссий Kwork."""
+    """Создает Opportunity с маржой, спросом, рисками и русским выводом."""
 
     scoring_rules = load_scoring_rules()
     mapping = mapping_data or {}
 
-    sell_price = _calculate_sell_price(item.price)
-    margin_percent = _calculate_margin_percent(item.price, sell_price)
+    sell_price = _select_sell_price(item.price, mapping.get("average_price"))
+    margin_percent = calculate_margin_percent(item.price, sell_price)
     margin_score = _score_margin(margin_percent, scoring_rules)
-    risk_score = _score_risk(risk_level, scoring_rules)
-    demand_score = float(
-        scoring_rules.get("demand_scores", {}).get("unknown", {}).get("score", 30)
+    risk_score = _score_risk(
+        risk_level,
+        scoring_rules,
+        competitors_count=mapping.get("competitors_count"),
+        requires_login_password=item.requires_login_password,
     )
+    demand_score = _score_demand(mapping.get("competitors_count"), scoring_rules)
     opportunity_score = _weighted_score(
         margin_score=margin_score,
         risk_score=risk_score,
@@ -61,39 +68,12 @@ def score_opportunity(
         opportunity_score=round(opportunity_score, 2),
         verdict=verdict,
         recommendation=_recommendation_text(verdict),
+        forbidden_words=list(mapping.get("forbidden_words") or []),
+        safe_wording=mapping.get("safe_wording"),
         buyer_requirements=mapping.get("buyer_requirements"),
+        forbidden_buyer_requests=_forbidden_buyer_requests_text(),
         report_format=mapping.get("report_format"),
     )
-
-
-def _calculate_sell_price(buy_price: Decimal | None) -> Decimal | None:
-    if buy_price is None:
-        return None
-
-    target_margin = Decimal(str(config.DEFAULT_TARGET_MARGIN_PERCENT)) / Decimal("100")
-    total_fee = (
-        Decimal(str(config.KWORK_FEE_PERCENT + config.WITHDRAWAL_FEE_PERCENT))
-        / Decimal("100")
-    )
-    net_multiplier = Decimal("1") - total_fee
-    if net_multiplier <= 0:
-        raise ValueError("Суммарная комиссия не может быть 100% или выше")
-
-    sell_price = (buy_price * (Decimal("1") + target_margin)) / net_multiplier
-    return sell_price.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
-
-def _calculate_margin_percent(
-    buy_price: Decimal | None,
-    sell_price: Decimal | None,
-) -> float | None:
-    if buy_price is None or sell_price is None or buy_price == 0:
-        return None
-
-    total_fee = Decimal(str(config.KWORK_FEE_PERCENT + config.WITHDRAWAL_FEE_PERCENT))
-    net_revenue = sell_price * (Decimal("1") - total_fee / Decimal("100"))
-    margin_percent = ((net_revenue - buy_price) / buy_price) * Decimal("100")
-    return float(margin_percent.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
 def _score_margin(margin_percent: float | None, rules: dict[str, Any]) -> float:
@@ -108,19 +88,86 @@ def _score_margin(margin_percent: float | None, rules: dict[str, Any]) -> float:
     return _midpoint(margin_rules.get("high_margin", {}), 85)
 
 
-def _score_risk(risk_level: RiskLevel, rules: dict[str, Any]) -> float:
+def _select_sell_price(
+    buy_price: Decimal | None,
+    kwork_average_price: object | None,
+) -> Decimal | None:
+    parsed_average = _parse_decimal(kwork_average_price)
+    if parsed_average is not None and parsed_average > 0:
+        return parsed_average
+    return calculate_sell_price(buy_price)
+
+
+def _parse_decimal(value: object | None) -> Decimal | None:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    raw = raw.replace("\u00a0", " ").replace(" ", "").replace(",", ".")
+    raw = re.sub(r"[^0-9.\-]", "", raw)
+    if not raw:
+        return None
+    try:
+        parsed = Decimal(raw)
+    except InvalidOperation:
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _score_risk(
+    risk_level: RiskLevel,
+    rules: dict[str, Any],
+    *,
+    competitors_count: object | None = None,
+    requires_login_password: bool = False,
+) -> float:
     risk_rules = rules.get("risk_scores", {})
     if risk_level == "GREEN":
-        return _range_midpoint(
+        base_score = _range_midpoint(
             risk_rules.get("green_min", 80),
             risk_rules.get("green_max", 100),
         )
-    if risk_level == "YELLOW":
-        return _range_midpoint(
+    elif risk_level == "YELLOW":
+        base_score = _range_midpoint(
             risk_rules.get("yellow_min", 30),
             risk_rules.get("yellow_max", 70),
         )
-    return float(risk_rules.get("red", 0))
+    else:
+        return float(risk_rules.get("red", 0))
+
+    competitors = _safe_int(competitors_count)
+    if competitors is not None and competitors >= 50:
+        base_score -= 10
+    if requires_login_password:
+        base_score += float(rules.get("adjustments", {}).get("requires_login_password", -40))
+    return max(0, min(100, base_score))
+
+
+def _score_demand(competitors_count: object | None, rules: dict[str, Any]) -> float:
+    demand_rules = rules.get("demand_scores", {})
+    competitors = _safe_int(competitors_count)
+    if competitors is None:
+        return float(demand_rules.get("unknown", {}).get("score", 30))
+
+    high = demand_rules.get("high", {})
+    medium = demand_rules.get("medium", {})
+    low = demand_rules.get("low", {})
+
+    if competitors >= int(high.get("competitors_min", 20)):
+        return _midpoint(high, 85)
+    if competitors >= int(medium.get("competitors_min", 5)):
+        return _midpoint(medium, 55)
+    return _midpoint(low, 25)
+
+
+def _safe_int(value: object | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _weighted_score(
@@ -188,3 +235,10 @@ def _recommendation_text(verdict: str) -> str:
     if verdict == "не брать":
         return "Исключить из работы"
     return "Перед запуском провести ручную проверку"
+
+
+def _forbidden_buyer_requests_text() -> str:
+    return (
+        "Нельзя просить логин, пароль, коды восстановления, секретные ключи, "
+        "доступ к аккаунту или платежные данные покупателя."
+    )

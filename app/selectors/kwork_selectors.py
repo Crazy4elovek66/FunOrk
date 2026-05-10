@@ -26,11 +26,13 @@ CATALOG_SELECTORS = {
 }
 
 KWORK_CARD_SELECTORS = {
-    "kwork_card": ".kwork-card, .card, article, [data-kwork-id]",
+    "kwork_card": ".kwork-card, .kwork-card-item, .card, article, [data-kwork-id]",
     "kwork_title": ".kwork-card-item__title, .title, h1, h2, a",
     "kwork_url": "a[href]",
-    "kwork_price": ".price, .kwork-price, [class*='price']",
-    "kwork_keywords": ".tag, .tags a, [class*='tag']",
+    "kwork_price": ".price, .kwork-price, .kwork-card-item__price, [class*='price']",
+    "kwork_keywords": ".tag, .tags a, [class*='tag'], [class*='keyword']",
+    "filter_keywords": ".filter a, .filters a, .sidebar a, [class*='filter'] a",
+    "pagination_next": "a[rel='next'], .pagination a.next, .paging a.next, a[href*='page=']",
 }
 
 REQUIRED_SELECTORS = {

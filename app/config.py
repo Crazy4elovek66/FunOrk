@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
+
+load_dotenv()
 
 
 class ConfigError(RuntimeError):
@@ -58,6 +62,7 @@ class AppConfig(BaseModel):
     FUNPAY_BASE_URL: str = Field(..., min_length=1)
     KWORK_BASE_URL: str = Field(..., min_length=1)
     KWORK_SITEMAP_URL: str = Field(..., min_length=1)
+    KWORK_COOKIE: str | None = Field(default_factory=lambda: os.getenv("KWORK_COOKIE"))
     CACHE_DIR: Path
 
     REPORT_SETTINGS: ReportSettings = Field(default_factory=ReportSettings)

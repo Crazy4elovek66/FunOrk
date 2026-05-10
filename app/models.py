@@ -10,7 +10,14 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 
 
 RiskLevel = Literal["GREEN", "YELLOW", "RED"]
-ParseStatus = Literal["pending", "success", "parse_failed", "request_failed", "skipped"]
+ParseStatus = Literal[
+    "pending",
+    "success",
+    "parse_failed",
+    "request_failed",
+    "skipped",
+    "auth_failed",
+]
 
 
 def utc_now() -> datetime:
@@ -31,6 +38,11 @@ class ScrapedItem(BaseModel):
     description: str | None = None
     category: str | None = None
     subcategory: str | None = None
+    requires_login_password: bool = False
+    can_be_done_by_id: bool = False
+    is_code_or_key: bool = False
+    is_subscription: bool = False
+    is_service: bool = False
     parse_status: ParseStatus = "success"
     parse_error: str | None = None
     scraped_at: datetime = Field(default_factory=utc_now)
@@ -136,5 +148,29 @@ class Opportunity(BaseModel):
     forbidden_words: list[str] = Field(default_factory=list)
     safe_wording: str | None = None
     buyer_requirements: str | None = None
+    forbidden_buyer_requests: str | None = None
     report_format: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class ParseError(BaseModel):
+    model_config = ConfigDict(validate_assignment=True)
+
+    id: int | None = None
+    source: Literal["funpay", "kwork"]
+    url: str
+    status: ParseStatus
+    error: str
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class RunHistory(BaseModel):
+    model_config = ConfigDict(validate_assignment=True)
+
+    id: int | None = None
+    command: str
+    status: Literal["success", "failed"]
+    started_at: datetime
+    finished_at: datetime = Field(default_factory=utc_now)
+    processed_count: int = Field(default=0, ge=0)
+    error: str | None = None

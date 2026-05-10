@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import re
 from decimal import Decimal, InvalidOperation
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup, Tag
 
 from app.collectors.http_client import AntiBanError, HttpClient, HttpClientError
+from app.config import config
 from app.models import ParseStatus, ScrapedItem
+from app.rules.loader import load_funpay_types
 from app.selectors.funpay_selectors import (
     BASE_URL,
     LOTS_SELECTORS,
@@ -18,40 +20,90 @@ from app.selectors.funpay_selectors import (
 )
 
 
-def parse_category(url: str) -> list[ScrapedItem]:
+def parse_category(url: str, *, force: bool = False) -> list[ScrapedItem]:
     """Загружает категорию FunPay и возвращает структурированные лоты."""
 
+    client = HttpClient()
+    max_pages = max(1, config.MAX_PAGES_PER_RUN)
+    current_url = url
+    seen_pages: set[str] = set()
+    seen_items: set[str] = set()
+    items: list[ScrapedItem] = []
+
     try:
-        html = HttpClient().get_html(url)
+        for _ in range(max_pages):
+            normalized_page_url = _normalize_url(current_url)
+            if normalized_page_url in seen_pages:
+                break
+            seen_pages.add(normalized_page_url)
+
+            html = client.get_html(current_url, source="funpay", force=force)
+            soup = BeautifulSoup(html, "html.parser")
+            selector_error = _validate_required_selectors(soup)
+            if selector_error:
+                if not items:
+                    return [_failed_item(current_url, "parse_failed", selector_error)]
+                break
+
+            items.extend(_parse_items_from_page(soup, current_url, seen_items))
+
+            next_url = _find_next_page_url(soup, current_url, seen_pages)
+            if not next_url:
+                break
+            current_url = next_url
     except AntiBanError:
         raise
     except HttpClientError as error:
-        return [_failed_item(url, "request_failed", str(error))]
-
-    soup = BeautifulSoup(html, "html.parser")
-    selector_error = _validate_required_selectors(soup)
-    if selector_error:
-        return [_failed_item(url, "parse_failed", selector_error)]
-
-    items: list[ScrapedItem] = []
-    for row in soup.select(LOTS_SELECTORS["lot_row"]):
-        if not isinstance(row, Tag):
-            continue
-
-        item = _parse_lot_row(row, url)
-        if item is not None:
-            items.append(item)
+        if items:
+            return items
+        return [_failed_item(current_url, "request_failed", str(error))]
 
     if not items:
         return [
             _failed_item(
                 url,
                 "parse_failed",
-                "Селекторы найдены, но валидные лоты не собраны",
+                "Селекторы найдены, но валидные лоты не собраны.",
             )
         ]
 
     return items
+
+
+def _parse_items_from_page(
+    soup: BeautifulSoup,
+    page_url: str,
+    seen_items: set[str],
+) -> list[ScrapedItem]:
+    items: list[ScrapedItem] = []
+    for row in soup.select(LOTS_SELECTORS["lot_row"]):
+        if not isinstance(row, Tag):
+            continue
+        if _is_pagination_link(row):
+            continue
+
+        item = _parse_lot_row(row, page_url)
+        if item is None:
+            continue
+
+        item_key = _normalize_url(item.url)
+        if item_key in seen_items:
+            continue
+        seen_items.add(item_key)
+        items.append(item)
+    return items
+
+
+def _is_pagination_link(row: Tag) -> bool:
+    href = str(row.get("href") or "")
+    rel = " ".join(row.get("rel", [])).casefold()
+    class_name = " ".join(row.get("class", [])).casefold()
+    text = _normalize_spaces(row.get_text(" ", strip=True)).casefold()
+    if "next" in rel or "pagination" in class_name or "pager" in class_name:
+        return True
+    if "page=" in href and text in {"", ">", "следующая"}:
+        return True
+    return False
 
 
 def _validate_required_selectors(soup: BeautifulSoup) -> str | None:
@@ -60,7 +112,10 @@ def _validate_required_selectors(soup: BeautifulSoup) -> str | None:
         if not selector:
             return f"В funpay_selectors не описан обязательный селектор: {selector_name}"
         if not soup.select_one(selector):
-            return f"На странице FunPay не найден обязательный селектор {selector_name}: {selector}"
+            return (
+                "На странице FunPay не найден обязательный селектор "
+                f"{selector_name}: {selector}"
+            )
     return None
 
 
@@ -81,6 +136,7 @@ def _parse_lot_row(row: Tag, category_url: str) -> ScrapedItem | None:
     price_text = _extract_text(row, LOTS_SELECTORS["lot_price"])
     price, currency = _parse_price(price_text)
     description = _extract_text(row, LOTS_SELECTORS.get("lot_delivery", ""))
+    features = _detect_features(row, title, description)
 
     return ScrapedItem(
         source="funpay",
@@ -90,8 +146,149 @@ def _parse_lot_row(row: Tag, category_url: str) -> ScrapedItem | None:
         currency=currency,
         description=description,
         category=category_url,
+        requires_login_password=features["requires_login_password"],
+        can_be_done_by_id=features["can_be_done_by_id"],
+        is_code_or_key=features["is_code_or_key"],
+        is_subscription=features["is_subscription"],
+        is_service=features["is_service"],
         parse_status="success",
     )
+
+
+def collect_catalog(
+    base_url: str = BASE_URL,
+    *,
+    force: bool = False,
+    limit: int = 100,
+) -> list[str]:
+    """Собирает ссылки на публичные категории FunPay с главной страницы."""
+
+    html = HttpClient().get_html(base_url, source="funpay", force=force)
+    soup = BeautifulSoup(html, "html.parser")
+    urls: list[str] = []
+    seen: set[str] = set()
+    for link in soup.select("a[href]"):
+        href = link.get("href")
+        if not href:
+            continue
+        url = urljoin(BASE_URL, str(href))
+        if "/lots/" not in url or url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+        if len(urls) >= limit:
+            break
+    return urls
+
+
+def _detect_features(row: Tag, title: str, description: str | None) -> dict[str, bool]:
+    text = _normalize_spaces(
+        " ".join(filter(None, (title, description, row.get_text(" ", strip=True))))
+    ).casefold()
+
+    type_markers = _matched_type_markers(text)
+    requires_login_password = _requires_credentials(text)
+    can_be_done_by_id = _contains_any(
+        text,
+        (
+            "по id",
+            "по айди",
+            "id",
+            "uid",
+            "ник",
+            "nickname",
+        ),
+    )
+
+    return {
+        "requires_login_password": requires_login_password,
+        "can_be_done_by_id": can_be_done_by_id,
+        "is_code_or_key": bool({"keys", "gift_cards"} & type_markers)
+        or _contains_any(text, ("ключ", "код", "key", "code", "gift card")),
+        "is_subscription": "subscription" in type_markers
+        or _contains_any(text, ("подписка", "subscription", "premium")),
+        "is_service": "services" in type_markers
+        or _contains_any(
+            text,
+            (
+                "услуга",
+                "настройка",
+                "помощь",
+                "консультация",
+                "service",
+                "setup",
+                "coaching",
+            ),
+        ),
+    }
+
+
+def _matched_type_markers(text: str) -> set[str]:
+    matched: set[str] = set()
+    for type_key, type_data in load_funpay_types().items():
+        markers = type_data.get("markers", []) if isinstance(type_data, dict) else []
+        if any(_contains_marker(text, str(marker)) for marker in markers):
+            matched.add(str(type_key))
+    return matched
+
+
+def _requires_credentials(text: str) -> bool:
+    if _contains_any(
+        text,
+        (
+            "без пароля",
+            "без логина",
+            "без доступа",
+            "пароль не нужен",
+            "логин не нужен",
+            "no password",
+            "without password",
+            "without login",
+        ),
+    ):
+        return False
+    return _contains_any(
+        text,
+        (
+            "логин",
+            "пароль",
+            "аккаунт",
+            "account",
+            "login",
+            "password",
+        ),
+    )
+
+
+def _find_next_page_url(
+    soup: BeautifulSoup,
+    current_url: str,
+    seen_pages: set[str],
+) -> str | None:
+    current = _normalize_url(current_url)
+    selectors = (
+        "a[rel='next']",
+        ".pagination a.next",
+        ".pagination a[href]",
+        "a[href*='page=']",
+    )
+    for selector in selectors:
+        for link in soup.select(selector):
+            if not isinstance(link, Tag):
+                continue
+            href = link.get("href")
+            if not href:
+                continue
+            text = _normalize_spaces(link.get_text(" ", strip=True)).casefold()
+            class_name = " ".join(link.get("class", [])).casefold()
+            rel = " ".join(link.get("rel", [])).casefold()
+            if "next" not in rel and "next" not in class_name:
+                if text not in {"", ">", "следующая"} and "page=" not in str(href):
+                    continue
+            next_url = _normalize_url(urljoin(current_url, str(href)))
+            if next_url != current and next_url not in seen_pages:
+                return next_url
+    return None
 
 
 def _extract_text(row: Tag, selector: str) -> str | None:
@@ -140,6 +337,22 @@ def _normalize_currency(value: str | None) -> str | None:
 
 def _normalize_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
+
+
+def _normalize_url(url: str) -> str:
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query, ""))
+
+
+def _contains_any(text: str, markers: tuple[str, ...]) -> bool:
+    return any(_contains_marker(text, marker) for marker in markers)
+
+
+def _contains_marker(text: str, marker: str) -> bool:
+    normalized_marker = _normalize_spaces(marker).casefold()
+    if not normalized_marker:
+        return False
+    return normalized_marker in text
 
 
 def _failed_item(url: str, status: ParseStatus, error: str) -> ScrapedItem:

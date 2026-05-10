@@ -5,10 +5,12 @@ from __future__ import annotations
 import random
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 import requests
 
 from app.config import config
+from app.db import cache_page, get_cached_page
 
 
 class HttpClientError(RuntimeError):
@@ -33,13 +35,24 @@ class HttpClient:
             self.session = requests.Session()
         self.session.headers.update({"User-Agent": config.USER_AGENT})
 
-    def get_html(self, url: str) -> str:
+    def get_html(self, url: str, *, source: str = "funpay", force: bool = False) -> str:
         """Возвращает HTML страницы или выбрасывает понятную ошибку загрузки."""
+
+        if not force:
+            cached = get_cached_page(url)
+            if cached is not None:
+                fetched_at = datetime.fromisoformat(cached["fetched_at"])
+                if datetime.now() - fetched_at <= timedelta(hours=config.CACHE_TTL_HOURS):
+                    return str(cached["html"])
 
         _sleep_before_request()
 
+        headers = {}
+        if source == "kwork" and config.KWORK_COOKIE:
+            headers["Cookie"] = config.KWORK_COOKIE
+
         try:
-            response = self.session.get(url, timeout=self.timeout)
+            response = self.session.get(url, timeout=self.timeout, headers=headers)
         except requests.RequestException as error:
             raise HttpClientError(f"Не удалось загрузить страницу {url}: {error}") from error
 
@@ -58,14 +71,21 @@ class HttpClient:
         if not response.text.strip():
             raise HttpClientError(f"Страница вернула пустой HTML: {url}")
 
+        if "isYandexSmartCaptcha" in response.text:
+            raise AntiBanError(
+                "Kwork заблокировал доступ через Yandex SmartCaptcha. "
+                "Парсинг через requests невозможен."
+            )
+
+        cache_page(url, source=source, html=response.text, status_code=response.status_code)
         return response.text
 
 
 def _sleep_before_request() -> None:
+    min_interval = 60 / config.MAX_REQUESTS_PER_MINUTE
     delay = random.uniform(config.REQUEST_DELAY_MIN, config.REQUEST_DELAY_MAX)
-    if delay > 0:
-        time.sleep(delay)
+    time.sleep(max(delay, min_interval))
 
 
-def get_html(url: str, timeout: float = 20.0) -> str:
-    return HttpClient(timeout=timeout).get_html(url)
+def get_html(url: str, timeout: float = 20.0, *, source: str = "funpay", force: bool = False) -> str:
+    return HttpClient(timeout=timeout).get_html(url, source=source, force=force)

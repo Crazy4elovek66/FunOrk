@@ -1,14 +1,24 @@
-"""Минимальный SQLite-слой для MVP."""
+"""SQLite-слой FunOrk: импорт, анализ, отчеты, кеш и ошибки парсинга."""
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 
 from app.config import config
-from app.models import AnalysisResult, ScrapedItem
+from app.models import (
+    AnalysisResult,
+    FunPayCategory,
+    KworkCategory,
+    Opportunity,
+    ParseError,
+    RunHistory,
+    ScrapedItem,
+)
 
 SCRAPED_ITEMS_UNIQUE_COLUMNS = ("source", "url")
 
@@ -38,7 +48,7 @@ def get_connection(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
 
 
 def init_db(db_path: Path | None = None) -> None:
-    """Создает таблицы scraped_items и analysis_results."""
+    """Создает таблицы и безопасно добавляет недостающие колонки."""
 
     with get_connection(db_path) as connection:
         table_exists = connection.execute(
@@ -61,6 +71,11 @@ def init_db(db_path: Path | None = None) -> None:
                 description TEXT,
                 category TEXT,
                 subcategory TEXT,
+                requires_login_password INTEGER NOT NULL DEFAULT 0,
+                can_be_done_by_id INTEGER NOT NULL DEFAULT 0,
+                is_code_or_key INTEGER NOT NULL DEFAULT 0,
+                is_subscription INTEGER NOT NULL DEFAULT 0,
+                is_service INTEGER NOT NULL DEFAULT 0,
                 parse_status TEXT NOT NULL,
                 parse_error TEXT,
                 scraped_at TEXT NOT NULL,
@@ -68,6 +83,11 @@ def init_db(db_path: Path | None = None) -> None:
             )
             """
         )
+        _ensure_column(connection, "scraped_items", "requires_login_password", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "scraped_items", "can_be_done_by_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "scraped_items", "is_code_or_key", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "scraped_items", "is_subscription", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "scraped_items", "is_service", "INTEGER NOT NULL DEFAULT 0")
         if table_exists:
             _ensure_scraped_items_unique_constraint(connection)
 
@@ -88,10 +108,146 @@ def init_db(db_path: Path | None = None) -> None:
             """
         )
         connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS opportunities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                funpay_category_id INTEGER,
+                source_category TEXT NOT NULL,
+                source_subcategory TEXT,
+                source_url TEXT NOT NULL,
+                normalized_type TEXT NOT NULL,
+                possible_kwork_service_title TEXT,
+                possible_kwork_category TEXT,
+                buy_price TEXT,
+                sell_price TEXT,
+                estimated_margin_percent REAL,
+                risk_level TEXT NOT NULL,
+                risk_reason TEXT NOT NULL,
+                moderation_risk TEXT,
+                dispute_risk TEXT,
+                demand_weight REAL NOT NULL DEFAULT 0,
+                margin_weight REAL NOT NULL DEFAULT 0,
+                risk_weight REAL NOT NULL DEFAULT 0,
+                opportunity_score REAL NOT NULL DEFAULT 0,
+                verdict TEXT NOT NULL,
+                recommendation TEXT,
+                forbidden_words TEXT NOT NULL DEFAULT '[]',
+                safe_wording TEXT,
+                buyer_requirements TEXT,
+                forbidden_buyer_requests TEXT,
+                report_format TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        _ensure_column(connection, "opportunities", "forbidden_buyer_requests", "TEXT")
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS funpay_categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category_name TEXT NOT NULL,
+                subcategory_name TEXT,
+                url TEXT NOT NULL UNIQUE,
+                raw_type TEXT,
+                normalized_type TEXT,
+                min_price TEXT,
+                median_price TEXT,
+                currency TEXT,
+                offers_count INTEGER,
+                delivery_method TEXT,
+                requires_login_password INTEGER NOT NULL DEFAULT 0,
+                can_be_done_by_id INTEGER NOT NULL DEFAULT 0,
+                is_code_or_key INTEGER NOT NULL DEFAULT 0,
+                is_subscription INTEGER NOT NULL DEFAULT 0,
+                is_service INTEGER NOT NULL DEFAULT 0,
+                last_checked_at TEXT NOT NULL,
+                parse_status TEXT NOT NULL,
+                parse_error TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS kwork_categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category_name TEXT NOT NULL,
+                subcategory_name TEXT,
+                url TEXT NOT NULL UNIQUE,
+                average_price TEXT,
+                min_price TEXT,
+                competitors_count INTEGER,
+                keywords TEXT NOT NULL DEFAULT '[]',
+                last_checked_at TEXT NOT NULL,
+                parse_status TEXT NOT NULL,
+                parse_error TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS run_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                command TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT NOT NULL,
+                processed_count INTEGER NOT NULL DEFAULT 0,
+                error TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS parse_errors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL,
+                url TEXT NOT NULL,
+                status TEXT NOT NULL,
+                error TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cached_pages (
+                url TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                html TEXT NOT NULL,
+                fetched_at TEXT NOT NULL,
+                status_code INTEGER
+            )
+            """
+        )
+
+        connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_scraped_items_source ON scraped_items(source)"
         )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_analysis_results_item_id ON analysis_results(item_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_opportunities_score ON opportunities(opportunity_score DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_parse_errors_source ON parse_errors(source)"
+        )
+
+
+def _ensure_column(
+    connection: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    column_definition: str,
+) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+    if column_name not in columns:
+        connection.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
         )
 
 
@@ -127,9 +283,11 @@ def save_scraped_item(item: ScrapedItem, db_path: Path | None = None) -> int:
             """
             INSERT INTO scraped_items (
                 source, url, title, price, currency, description, category,
-                subcategory, parse_status, parse_error, scraped_at
+                subcategory, requires_login_password, can_be_done_by_id,
+                is_code_or_key, is_subscription, is_service, parse_status,
+                parse_error, scraped_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source, url) DO UPDATE SET
                 title = excluded.title,
                 price = excluded.price,
@@ -137,6 +295,11 @@ def save_scraped_item(item: ScrapedItem, db_path: Path | None = None) -> int:
                 description = excluded.description,
                 category = excluded.category,
                 subcategory = excluded.subcategory,
+                requires_login_password = excluded.requires_login_password,
+                can_be_done_by_id = excluded.can_be_done_by_id,
+                is_code_or_key = excluded.is_code_or_key,
+                is_subscription = excluded.is_subscription,
+                is_service = excluded.is_service,
                 parse_status = excluded.parse_status,
                 parse_error = excluded.parse_error,
                 scraped_at = excluded.scraped_at
@@ -150,6 +313,11 @@ def save_scraped_item(item: ScrapedItem, db_path: Path | None = None) -> int:
                 item.description,
                 item.category,
                 item.subcategory,
+                int(item.requires_login_password),
+                int(item.can_be_done_by_id),
+                int(item.is_code_or_key),
+                int(item.is_subscription),
+                int(item.is_service),
                 item.parse_status,
                 item.parse_error,
                 item.scraped_at.isoformat(),
@@ -173,7 +341,7 @@ def save_scraped_item(item: ScrapedItem, db_path: Path | None = None) -> int:
 def save_analysis_result(
     result: AnalysisResult, db_path: Path | None = None
 ) -> int:
-    """Сохраняет результат анализа и возвращает его id."""
+    """Сохраняет старый компактный результат анализа для обратной совместимости."""
 
     with get_connection(db_path) as connection:
         cursor = connection.execute(
@@ -198,17 +366,258 @@ def save_analysis_result(
         return int(cursor.lastrowid)
 
 
-def fetch_scraped_items(db_path: Path | None = None) -> list[sqlite3.Row]:
+def save_opportunity(opportunity: Opportunity, db_path: Path | None = None) -> int:
+    """Сохраняет полный Opportunity для отчетов и повторного анализа."""
+
     with get_connection(db_path) as connection:
-        return list(
-            connection.execute(
-                """
-                SELECT *
-                FROM scraped_items
-                ORDER BY scraped_at DESC, id DESC
-                """
-            ).fetchall()
+        connection.execute(
+            "DELETE FROM opportunities WHERE source_url = ?",
+            (opportunity.source_url,),
         )
+        cursor = connection.execute(
+            """
+            INSERT INTO opportunities (
+                funpay_category_id, source_category, source_subcategory, source_url,
+                normalized_type, possible_kwork_service_title, possible_kwork_category,
+                buy_price, sell_price, estimated_margin_percent, risk_level, risk_reason,
+                moderation_risk, dispute_risk, demand_weight, margin_weight, risk_weight,
+                opportunity_score, verdict, recommendation, forbidden_words, safe_wording,
+                buyer_requirements, forbidden_buyer_requests, report_format, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                opportunity.funpay_category_id,
+                opportunity.source_category,
+                opportunity.source_subcategory,
+                opportunity.source_url,
+                opportunity.normalized_type,
+                opportunity.possible_kwork_service_title,
+                opportunity.possible_kwork_category,
+                str(opportunity.buy_price) if opportunity.buy_price is not None else None,
+                str(opportunity.sell_price) if opportunity.sell_price is not None else None,
+                opportunity.estimated_margin_percent,
+                opportunity.risk_level,
+                opportunity.risk_reason,
+                opportunity.moderation_risk,
+                opportunity.dispute_risk,
+                opportunity.demand_weight,
+                opportunity.margin_weight,
+                opportunity.risk_weight,
+                opportunity.opportunity_score,
+                opportunity.verdict,
+                opportunity.recommendation,
+                json.dumps(opportunity.forbidden_words, ensure_ascii=False),
+                opportunity.safe_wording,
+                opportunity.buyer_requirements,
+                opportunity.forbidden_buyer_requests,
+                opportunity.report_format,
+                opportunity.created_at.isoformat(),
+            ),
+        )
+        return int(cursor.lastrowid)
+
+
+def save_funpay_category(category: FunPayCategory, db_path: Path | None = None) -> int:
+    with get_connection(db_path) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO funpay_categories (
+                category_name, subcategory_name, url, raw_type, normalized_type,
+                min_price, median_price, currency, offers_count, delivery_method,
+                requires_login_password, can_be_done_by_id, is_code_or_key,
+                is_subscription, is_service, last_checked_at, parse_status, parse_error
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(url) DO UPDATE SET
+                category_name = excluded.category_name,
+                subcategory_name = excluded.subcategory_name,
+                raw_type = excluded.raw_type,
+                normalized_type = excluded.normalized_type,
+                min_price = excluded.min_price,
+                median_price = excluded.median_price,
+                currency = excluded.currency,
+                offers_count = excluded.offers_count,
+                delivery_method = excluded.delivery_method,
+                requires_login_password = excluded.requires_login_password,
+                can_be_done_by_id = excluded.can_be_done_by_id,
+                is_code_or_key = excluded.is_code_or_key,
+                is_subscription = excluded.is_subscription,
+                is_service = excluded.is_service,
+                last_checked_at = excluded.last_checked_at,
+                parse_status = excluded.parse_status,
+                parse_error = excluded.parse_error
+            """,
+            (
+                category.category_name,
+                category.subcategory_name,
+                category.url,
+                category.raw_type,
+                category.normalized_type,
+                str(category.min_price) if category.min_price is not None else None,
+                str(category.median_price) if category.median_price is not None else None,
+                category.currency,
+                category.offers_count,
+                category.delivery_method,
+                int(category.requires_login_password),
+                int(category.can_be_done_by_id),
+                int(category.is_code_or_key),
+                int(category.is_subscription),
+                int(category.is_service),
+                category.last_checked_at.isoformat(),
+                category.parse_status,
+                category.parse_error,
+            ),
+        )
+        return _last_id_or_existing(connection, cursor, "funpay_categories", category.url)
+
+
+def save_kwork_category(category: KworkCategory, db_path: Path | None = None) -> int:
+    with get_connection(db_path) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO kwork_categories (
+                category_name, subcategory_name, url, average_price, min_price,
+                competitors_count, keywords, last_checked_at, parse_status, parse_error
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(url) DO UPDATE SET
+                category_name = excluded.category_name,
+                subcategory_name = excluded.subcategory_name,
+                average_price = excluded.average_price,
+                min_price = excluded.min_price,
+                competitors_count = excluded.competitors_count,
+                keywords = excluded.keywords,
+                last_checked_at = excluded.last_checked_at,
+                parse_status = excluded.parse_status,
+                parse_error = excluded.parse_error
+            """,
+            (
+                category.category_name,
+                category.subcategory_name,
+                category.url,
+                str(category.average_price) if category.average_price is not None else None,
+                str(category.min_price) if category.min_price is not None else None,
+                category.competitors_count,
+                json.dumps(category.keywords, ensure_ascii=False),
+                category.last_checked_at.isoformat(),
+                category.parse_status,
+                category.parse_error,
+            ),
+        )
+        return _last_id_or_existing(connection, cursor, "kwork_categories", category.url)
+
+
+def _last_id_or_existing(
+    connection: sqlite3.Connection,
+    cursor: sqlite3.Cursor,
+    table_name: str,
+    url: str,
+) -> int:
+    if cursor.lastrowid:
+        return int(cursor.lastrowid)
+    row = connection.execute(
+        f"SELECT id FROM {table_name} WHERE url = ?",
+        (url,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(f"Не удалось сохранить запись в {table_name}: {url}")
+    return int(row["id"])
+
+
+def save_parse_error(error: ParseError, db_path: Path | None = None) -> int:
+    with get_connection(db_path) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO parse_errors (source, url, status, error, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                error.source,
+                error.url,
+                error.status,
+                error.error,
+                error.created_at.isoformat(),
+            ),
+        )
+        return int(cursor.lastrowid)
+
+
+def save_run_history(run: RunHistory, db_path: Path | None = None) -> int:
+    with get_connection(db_path) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO run_history (
+                command, status, started_at, finished_at, processed_count, error
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run.command,
+                run.status,
+                run.started_at.isoformat(),
+                run.finished_at.isoformat(),
+                run.processed_count,
+                run.error,
+            ),
+        )
+        return int(cursor.lastrowid)
+
+
+def cache_page(
+    url: str,
+    source: str,
+    html: str,
+    status_code: int | None = None,
+    db_path: Path | None = None,
+) -> None:
+    with get_connection(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO cached_pages (url, source, html, fetched_at, status_code)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(url) DO UPDATE SET
+                source = excluded.source,
+                html = excluded.html,
+                fetched_at = excluded.fetched_at,
+                status_code = excluded.status_code
+            """,
+            (url, source, html, datetime.now().isoformat(), status_code),
+        )
+
+
+def get_cached_page(url: str, db_path: Path | None = None) -> sqlite3.Row | None:
+    with get_connection(db_path) as connection:
+        return connection.execute(
+            "SELECT * FROM cached_pages WHERE url = ?",
+            (url,),
+        ).fetchone()
+
+
+def fetch_scraped_items(
+    db_path: Path | None = None,
+    *,
+    source: str | None = None,
+    limit: int | None = None,
+) -> list[sqlite3.Row]:
+    if limit is not None and limit < 0:
+        raise ValueError("Р›РёРјРёС‚ Р·Р°РїРёСЃРµР№ РЅРµ РјРѕР¶РµС‚ Р±С‹С‚СЊ РѕС‚СЂРёС†Р°С‚РµР»СЊРЅС‹Рј")
+
+    query = """
+        SELECT *
+        FROM scraped_items
+    """
+    params: list[object] = []
+    if source is not None:
+        query += " WHERE source = ?"
+        params.append(source)
+    query += " ORDER BY scraped_at DESC, id DESC"
+    if limit is not None:
+        query += " LIMIT ?"
+        params.append(limit)
+
+    with get_connection(db_path) as connection:
+        return list(connection.execute(query, tuple(params)).fetchall())
 
 
 def fetch_analysis_results(db_path: Path | None = None) -> list[sqlite3.Row]:
@@ -218,6 +627,58 @@ def fetch_analysis_results(db_path: Path | None = None) -> list[sqlite3.Row]:
                 """
                 SELECT *
                 FROM analysis_results
+                ORDER BY created_at DESC, id DESC
+                """
+            ).fetchall()
+        )
+
+
+def fetch_opportunities(db_path: Path | None = None) -> list[sqlite3.Row]:
+    with get_connection(db_path) as connection:
+        return list(
+            connection.execute(
+                """
+                SELECT *
+                FROM opportunities
+                ORDER BY opportunity_score DESC, created_at DESC, id DESC
+                """
+            ).fetchall()
+        )
+
+
+def fetch_kwork_categories(db_path: Path | None = None) -> list[sqlite3.Row]:
+    with get_connection(db_path) as connection:
+        return list(
+            connection.execute(
+                """
+                SELECT *
+                FROM kwork_categories
+                ORDER BY competitors_count DESC, last_checked_at DESC
+                """
+            ).fetchall()
+        )
+
+
+def fetch_run_history(db_path: Path | None = None) -> list[sqlite3.Row]:
+    with get_connection(db_path) as connection:
+        return list(
+            connection.execute(
+                """
+                SELECT *
+                FROM run_history
+                ORDER BY started_at DESC, id DESC
+                """
+            ).fetchall()
+        )
+
+
+def fetch_parse_errors(db_path: Path | None = None) -> list[sqlite3.Row]:
+    with get_connection(db_path) as connection:
+        return list(
+            connection.execute(
+                """
+                SELECT *
+                FROM parse_errors
                 ORDER BY created_at DESC, id DESC
                 """
             ).fetchall()
