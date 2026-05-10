@@ -1,0 +1,126 @@
+accounts:
+  ru_name: "Аккаунты"
+  risk: red
+  markers:
+    - account
+    - accounts
+    - аккаунт
+    - логин
+    - пароль
+
+keys:
+  ru_name: "Ключи"
+  risk: yellow
+  markers:
+    - key
+    - keys
+    - ключ
+    - activation
+    - активация
+
+top_up:
+  ru_name: "Пополнения"
+  risk: yellow
+  markers:
+    - top up
+    - пополнение
+    - coins
+    - robux
+    - diamonds
+    - донат
+
+services:
+  ru_name: "Услуги"
+  risk: green
+  markers:
+    - services
+    - услуга
+    - услуги
+    - настройка
+    - помощь
+    - setup
+
+subscription:
+  ru_name: "Подписки"
+  risk: yellow
+  markers:
+    - subscription
+    - subscriptions
+    - premium
+    - подписка
+    - подписки
+
+gift_cards:
+  ru_name: "Подарочные карты"
+  risk: yellow
+  markers:
+    - gift card
+    - gift cards
+    - подарочная карта
+    - подарочные карты
+
+boosting:
+  ru_name: "Бустинг"
+  risk: yellow
+  markers:
+    - boosting
+    - boost
+    - бустинг
+    - прокачка
+
+coaching:
+  ru_name: "Обучение/коучинг"
+  risk: green
+  markers:
+    - coaching
+    - коучинг
+    - обучение
+    - консультация
+
+drops:
+  ru_name: "Drops/бонусы"
+  risk: yellow
+  markers:
+    - drops
+    - twitch drops
+    - prime gaming
+    - бонусы
+
+ai_services:
+  ru_name: "AI-услуги"
+  risk: green
+  markers:
+    - ai
+    - ии
+    - нейросеть
+    - midjourney
+    - runway
+    - chatgpt
+    - gemini
+    - stable diffusion
+
+design_services:
+  ru_name: "Дизайн-услуги"
+  risk: green
+  markers:
+    - дизайн
+    - design
+    - баннер
+    - логотип
+    - визуал
+
+content_services:
+  ru_name: "Контент-услуги"
+  risk: green
+  markers:
+    - текст
+    - content
+    - контент
+    - article
+    - статья
+    - видео
+
+other:
+  ru_name: "Другое"
+  risk: yellow
+  markers: []

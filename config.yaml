@@ -1,0 +1,30 @@
+REQUEST_DELAY_MIN: 2
+REQUEST_DELAY_MAX: 6
+MAX_REQUESTS_PER_MINUTE: 15
+USER_AGENT: "Mozilla/5.0"
+CACHE_TTL_HOURS: 24
+DATABASE_PATH: "data/processed/analyzer.sqlite"
+REPORTS_DIR: "data/reports"
+ENABLE_FUNPAY_COLLECTION: true
+ENABLE_KWORK_COLLECTION: true
+DRY_RUN: false
+MAX_PAGES_PER_RUN: 300
+LOG_LEVEL: "INFO"
+KWORK_FEE_PERCENT: 20
+WITHDRAWAL_FEE_PERCENT: 0
+DEFAULT_TARGET_MARGIN_PERCENT: 40
+
+FUNPAY_BASE_URL: "https://funpay.com"
+KWORK_BASE_URL: "https://kwork.ru"
+KWORK_SITEMAP_URL: "https://kwork.ru/sitemap.xml"
+CACHE_DIR: "data/cache"
+
+REPORT_SETTINGS:
+  csv_delimiter: ";"
+  encoding: "utf-8-sig"
+  default_format: "xlsx"
+
+SCORING:
+  margin_weight: 0.4
+  risk_weight: 0.4
+  demand_weight: 0.2

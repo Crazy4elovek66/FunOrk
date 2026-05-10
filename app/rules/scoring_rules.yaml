@@ -1,0 +1,68 @@
+weights:
+  margin_weight: 0.4
+  risk_weight: 0.4
+  demand_weight: 0.2
+
+risk_scores:
+  green_min: 80
+  green_max: 100
+  yellow_min: 30
+  yellow_max: 70
+  red: 0
+
+margin_scores:
+  low_margin:
+    percent_max: 20
+    score_min: 10
+    score_max: 30
+  medium_margin:
+    percent_min: 20
+    percent_max: 50
+    score_min: 40
+    score_max: 70
+  high_margin:
+    percent_min: 50
+    score_min: 70
+    score_max: 100
+  unknown:
+    score: 30
+
+demand_scores:
+  high:
+    competitors_min: 20
+    score_min: 70
+    score_max: 100
+  medium:
+    competitors_min: 5
+    competitors_max: 19
+    score_min: 40
+    score_max: 70
+  low:
+    competitors_max: 4
+    score_min: 10
+    score_max: 40
+  unknown:
+    score: 30
+
+adjustments:
+  requires_login_password: -40
+  manual_review_required: -15
+  repeatable_service: 10
+  clear_buyer_report: 10
+  high_dispute_risk: -20
+
+verdicts:
+  test:
+    min_score: 75
+    title: "можно брать в тест"
+  careful:
+    min_score: 50
+    max_score: 74
+    title: "тестировать осторожно"
+  manual:
+    min_score: 1
+    max_score: 49
+    title: "только ручная проверка"
+  blocked:
+    score: 0
+    title: "не брать"

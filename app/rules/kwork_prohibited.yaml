@@ -1,0 +1,67 @@
+blocked_categories:
+  - accounts
+  - login_password
+  - coupons
+  - promocodes
+  - vpn
+  - bypass
+  - casino
+  - gambling
+  - crypto
+  - forex
+  - spam
+  - mass_mailing
+  - fake_reviews
+  - fake_comments
+  - adult
+  - phone_numbers
+  - sms_activation
+  - hacked_goods
+  - malware
+  - brute_force
+  - carding
+  - document_forgery
+  - services_without_value
+
+forbidden_words:
+  - накрутка
+  - обход
+  - взлом
+  - купить аккаунт
+  - логин
+  - пароль
+  - промокод
+  - купон
+  - казино
+  - ставки
+  - крипта
+  - гарантированно
+  - 100%
+  - без риска
+  - vpn
+  - аккаунт
+  - brute force
+  - carding
+
+yellow_categories:
+  - subscriptions
+  - subscription
+  - premium
+  - gift_cards
+  - top_up
+  - game_pass
+  - prime_gaming
+  - twitch_drops
+  - keys
+  - drops
+
+green_categories:
+  - ai_services
+  - design_services
+  - content_services
+  - setup
+  - consultation
+  - coaching
+  - instruction
+  - editing
+  - services
