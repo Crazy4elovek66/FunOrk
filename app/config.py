@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+from logging.handlers import RotatingFileHandler
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +57,8 @@ class AppConfig(BaseModel):
     ENABLE_KWORK_COLLECTION: bool
     DRY_RUN: bool
     MAX_PAGES_PER_RUN: int = Field(..., gt=0)
+    KWORK_MAX_CATEGORIES: int = Field(1000, gt=0)
+    KWORK_MAX_PAGES_PER_CATEGORY: int = Field(50, gt=0)
     LOG_LEVEL: str = Field(..., min_length=1)
     KWORK_FEE_PERCENT: float = Field(..., ge=0, le=100)
     WITHDRAWAL_FEE_PERCENT: float = Field(..., ge=0, le=100)
@@ -99,6 +104,10 @@ class AppConfig(BaseModel):
     def PROCESSED_DIR(self) -> Path:
         return self.DATABASE_PATH.parent
 
+    @property
+    def LOGS_DIR(self) -> Path:
+        return self.DATA_DIR / "logs"
+
 
 def _read_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
@@ -125,6 +134,7 @@ def ensure_directories(app_config: AppConfig) -> None:
         app_config.CACHE_DIR,
         app_config.PROCESSED_DIR,
         app_config.REPORTS_DIR,
+        app_config.LOGS_DIR,
     )
     for directory in directories:
         directory.mkdir(parents=True, exist_ok=True)
@@ -148,4 +158,37 @@ def load_config(path: Path | str | None = None, create_dirs: bool = True) -> App
     return app_config
 
 
+def configure_logging(app_config: AppConfig) -> None:
+    """Настраивает единый логгер приложения для консоли и файла."""
+
+    log_level = getattr(logging, app_config.LOG_LEVEL.upper(), logging.INFO)
+    log_path = app_config.LOGS_DIR / "app.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    formatter = logging.Formatter(
+        "[%(asctime)s] %(levelname)s [%(name)s] %(message)s"
+    )
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+
+    for handler in list(root_logger.handlers):
+        if getattr(handler, "_funork_handler", False):
+            root_logger.removeHandler(handler)
+            handler.close()
+
+    file_handler = RotatingFileHandler(
+        log_path,
+        maxBytes=5 * 1024 * 1024,
+        backupCount=2,
+        encoding="utf-8",
+    )
+    console_handler = logging.StreamHandler(sys.stdout)
+    for handler in (file_handler, console_handler):
+        handler.setLevel(log_level)
+        handler.setFormatter(formatter)
+        handler._funork_handler = True  # type: ignore[attr-defined]
+        root_logger.addHandler(handler)
+
+
 config = load_config()
+configure_logging(config)

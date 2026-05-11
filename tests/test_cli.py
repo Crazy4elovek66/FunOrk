@@ -35,6 +35,7 @@ def test_run_pipeline_uses_mocks_without_network_or_real_db(mocker):
         "app.cli.save_analysis_result",
         return_value=201,
     )
+    save_opportunity_mock = mocker.patch("app.cli.save_opportunity", return_value=301)
 
     summary = run_pipeline("https://funpay.com/test-category/")
 
@@ -47,10 +48,12 @@ def test_run_pipeline_uses_mocks_without_network_or_real_db(mocker):
     init_db_mock.assert_called_once_with()
     parse_category_mock.assert_called_once_with("https://funpay.com/test-category/")
     assert save_scraped_item_mock.call_count == 2
+    save_opportunity_mock.assert_called_once()
     save_analysis_result_mock.assert_called_once()
 
 
-def test_main_exports_without_url(mocker, capsys):
+def test_main_exports_without_url(mocker, caplog):
+    caplog.set_level("INFO", logger="app.cli")
     run_pipeline_mock = mocker.patch("app.cli.run_pipeline")
     export_to_csv_mock = mocker.patch(
         "app.cli.export_to_csv",
@@ -62,9 +65,8 @@ def test_main_exports_without_url(mocker, capsys):
 
     run_pipeline_mock.assert_not_called()
     export_to_csv_mock.assert_called_once_with()
-    output = capsys.readouterr().out
-    assert "Генерация отчета по накопленной базе..." in output
-    assert "Отчет сохранен: data/reports/report_test.csv" in output
+    assert "Генерация отчета по накопленной базе..." in caplog.text
+    assert "Отчет сохранен: data/reports/report_test.csv" in caplog.text
 
 
 def test_collect_kwork_saves_categories_and_items(mocker):
@@ -93,7 +95,7 @@ def test_collect_kwork_saves_categories_and_items(mocker):
     assert saved == 1
     collect_catalog_mock.assert_called_once_with(
         force=True,
-        limit=cli.config.MAX_PAGES_PER_RUN,
+        limit=cli.config.KWORK_MAX_CATEGORIES,
     )
     save_kwork_category_mock.assert_called_once_with(category)
     save_scraped_item_mock.assert_called_once_with(item)

@@ -6,6 +6,7 @@ import random
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from urllib.parse import urlsplit
 
 import requests
 
@@ -51,9 +52,7 @@ class HttpClient:
 
         _sleep_before_request()
 
-        headers = {}
-        if source == "kwork" and config.KWORK_COOKIE:
-            headers["Cookie"] = config.KWORK_COOKIE
+        headers = _build_request_headers(url, source=source)
 
         try:
             response = self.session.get(url, timeout=self.timeout, headers=headers)
@@ -75,7 +74,7 @@ class HttpClient:
         if not response.text.strip():
             raise HttpClientError(f"Страница вернула пустой HTML: {url}")
 
-        if "isYandexSmartCaptcha" in response.text:
+        if _has_blocking_smart_captcha(response.text):
             raise AntiBanError(
                 "Kwork вернул SmartCaptcha (Yandex SmartCaptcha). Парсинг requests невозможен. "
                 "Добавьте актуальный KWORK_COOKIE или используйте ручной импорт.",
@@ -90,6 +89,46 @@ def _sleep_before_request() -> None:
     min_interval = 60 / config.MAX_REQUESTS_PER_MINUTE
     delay = random.uniform(config.REQUEST_DELAY_MIN, config.REQUEST_DELAY_MAX)
     time.sleep(max(delay, min_interval))
+
+
+def _build_request_headers(url: str, *, source: str) -> dict[str, str]:
+    if source != "kwork":
+        return {}
+
+    headers = {
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,"
+            "image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+        ),
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Cache-Control": "max-age=0",
+        "Referer": "https://kwork.ru/seller",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+        "User-Agent": config.USER_AGENT,
+        "sec-ch-ua": '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
+        "sec-ch-ua-mobile": "?1",
+        "sec-ch-ua-platform": '"iOS"',
+    }
+
+    if urlsplit(url).netloc == "kwork.ru" and config.KWORK_COOKIE:
+        headers["Cookie"] = config.KWORK_COOKIE
+
+    return headers
+
+
+def _has_blocking_smart_captcha(html: str) -> bool:
+    lowered = html.casefold()
+    if "smart-captcha" in lowered:
+        return True
+    if "подтвердите, что вы не робот" in lowered and "captcha" in lowered:
+        return True
+    if "captcha-container" in lowered and "yandexsmartcaptcha" in lowered:
+        return True
+    return False
 
 
 def get_html(url: str, timeout: float = 20.0, *, source: str = "funpay", force: bool = False) -> str:

@@ -14,6 +14,9 @@ def analyze_risk(item: ScrapedItem) -> tuple[RiskLevel, str]:
     text = _normalize_text(" ".join(filter(None, (item.title, item.description))))
     prohibited = load_kwork_prohibited()
 
+    if item.requires_login_password:
+        return "RED", "Лот требует логин, пароль, почту или полный доступ к аккаунту"
+
     for word in prohibited.get("forbidden_words", []):
         if _contains_marker(text, str(word)):
             return "RED", f"Найдено запрещенное слово: {word}"
@@ -55,4 +58,6 @@ def _contains_marker(text: str, marker: str) -> bool:
     normalized_marker = _normalize_text(marker)
     if not normalized_marker:
         return False
+    if len(normalized_marker) <= 3:
+        return normalized_marker in set(re.findall(r"[a-zа-яё0-9]+", text))
     return normalized_marker in text

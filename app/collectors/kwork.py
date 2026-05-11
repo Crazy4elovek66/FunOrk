@@ -25,10 +25,58 @@ KWORK_CAPTCHA_ERROR = (
     "Kwork вернул SmartCaptcha. Парсинг requests невозможен. "
     "Добавьте актуальный KWORK_COOKIE или используйте ручной импорт."
 )
+KWORK_SESSION_ERROR = (
+    "KWORK_COOKIE недействительна или Kwork требует капчу. "
+    "Пожалуйста, обновите куки в файле .env"
+)
 KWORK_SERVICE_URL_RE = re.compile(
     r"^(?:https?://kwork\.ru)?/[^/?#]+/\d+/[^/?#]+",
     re.IGNORECASE,
 )
+
+
+class SessionValidationError(RuntimeError):
+    """Kwork не подтвердил активную пользовательскую сессию."""
+
+
+def verify_kwork_session(force: bool = True) -> bool:
+    """Проверяет, что Kwork доступен без капчи и видит авторизованного пользователя."""
+
+    client = HttpClient()
+    try:
+        html = client.get_html(config.KWORK_BASE_URL, source="kwork", force=True)
+    except AntiBanError as error:
+        html = getattr(error, "html", None)
+        if html:
+            save_kwork_debug_html(config.KWORK_BASE_URL, html, "pre-flight: Kwork вернул SmartCaptcha")
+        return False
+    except HttpClientError:
+        return False
+
+    if _has_smart_captcha(html):
+        save_kwork_debug_html(config.KWORK_BASE_URL, html, "pre-flight: найдена SmartCaptcha")
+        return False
+
+    soup = BeautifulSoup(html, "html.parser")
+    if _looks_like_authenticated_kwork_session(html, soup):
+        return True
+
+    seller_url = urljoin(config.KWORK_BASE_URL.rstrip("/") + "/", "seller")
+    try:
+        html = client.get_html(seller_url, source="kwork", force=True)
+    except AntiBanError as error:
+        html = getattr(error, "html", None)
+        if html:
+            save_kwork_debug_html(seller_url, html, "pre-flight: Kwork вернул SmartCaptcha")
+        return False
+    except HttpClientError:
+        return False
+
+    if _has_smart_captcha(html):
+        save_kwork_debug_html(seller_url, html, "pre-flight: найдена SmartCaptcha")
+        return False
+
+    return _looks_like_authenticated_kwork_session(html, BeautifulSoup(html, "html.parser"))
 
 
 def collect_catalog(
@@ -36,6 +84,9 @@ def collect_catalog(
     force: bool = False,
     limit: int = 100,
 ) -> tuple[list[KworkCategory], list[ScrapedItem]]:
+    if not verify_kwork_session(force=True):
+        raise SessionValidationError(KWORK_SESSION_ERROR)
+
     urls = _collect_sitemap_urls(force=force, limit=limit)
     if not urls:
         urls = _collect_catalog_urls(force=force, limit=limit)
@@ -58,7 +109,7 @@ def parse_kwork_category(
     """Загружает листинг Kwork и извлекает реальные карточки услуг."""
 
     client = HttpClient()
-    pages_limit = max(1, min(max_pages or config.MAX_PAGES_PER_RUN, 5))
+    pages_limit = max(1, max_pages or config.KWORK_MAX_PAGES_PER_CATEGORY)
     current_url = url
     seen_pages: set[str] = set()
     prices: list[Decimal] = []
@@ -82,7 +133,7 @@ def parse_kwork_category(
 
             if _has_smart_captcha(html):
                 save_kwork_debug_html(current_url, html, "найдена SmartCaptcha")
-                return _failed_category(url, "parse_failed", KWORK_CAPTCHA_ERROR, category_name=category_name), []
+                raise AntiBanError(KWORK_CAPTCHA_ERROR, html=html)
 
             page_items = _dedupe_items(
                 [
@@ -114,7 +165,7 @@ def parse_kwork_category(
         html = getattr(error, "html", None)
         if html:
             save_kwork_debug_html(current_url, html, "найдена SmartCaptcha")
-        return _failed_category(url, "parse_failed", KWORK_CAPTCHA_ERROR, category_name=category_name), []
+        raise
     except HttpClientError as error:
         return _failed_category(url, "request_failed", str(error), category_name=category_name), []
 
@@ -349,7 +400,7 @@ def _is_category_url(url: str) -> bool:
 
 def _category_name_from_url(url: str) -> str:
     slug = url.rstrip("/").split("/")[-1]
-    return re.sub(r"[-_]+", " ", slug).strip().title() or "Категория Kwork"
+    return _clean_category_name(re.sub(r"[-_]+", " ", slug).strip().title()) or "Категория Kwork"
 
 
 def _subcategory_name_from_url(url: str, category_name: str | None) -> str | None:
@@ -363,11 +414,11 @@ def _extract_category_name(soup: BeautifulSoup, url: str) -> str:
     for selector in ("h1", "[class*='page-title']", "[class*='category-title']"):
         title = soup.select_one(selector)
         if title:
-            text = _normalize_spaces(title.get_text(" ", strip=True))
+            text = _clean_category_name(title.get_text(" ", strip=True))
             if text:
                 return text
     if soup.title and soup.title.string:
-        title_text = _normalize_spaces(soup.title.string.split("|")[0])
+        title_text = _clean_category_name(soup.title.string.split("|")[0])
         if title_text:
             return title_text
     return _category_name_from_url(url)
@@ -517,9 +568,13 @@ def _json_payloads_from_script(text: str) -> list[object]:
     stripped = text.strip()
     if not stripped:
         return payloads
+
+    payloads.extend(_json_payloads_from_js_assignments(stripped))
+
     if stripped[0] in "[{":
         try:
-            return [json.loads(stripped)]
+            payloads.append(json.loads(stripped))
+            return payloads
         except json.JSONDecodeError:
             pass
 
@@ -530,15 +585,32 @@ def _json_payloads_from_script(text: str) -> list[object]:
         except json.JSONDecodeError:
             continue
         payloads.append(payload)
-        if len(payloads) >= 50:
+        if len(payloads) >= 200:
             break
+    return payloads
+
+
+def _json_payloads_from_js_assignments(text: str) -> list[object]:
+    payloads: list[object] = []
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"window\.(?:stateData|__INITIAL_STATE__)\s*=", text):
+        start = match.end()
+        while start < len(text) and text[start].isspace():
+            start += 1
+        if start >= len(text) or text[start] not in "{[":
+            continue
+        try:
+            payload, _ = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            continue
+        payloads.append(payload)
     return payloads
 
 
 def _walk_json_services(value: object) -> list[dict[str, object]]:
     services: list[dict[str, object]] = []
     if isinstance(value, dict):
-        title = _first_value(value, ("title", "name"))
+        title = _first_value(value, ("title", "gtitle", "name"))
         url = _first_value(value, ("url", "link", "href"))
         price = _json_price(value)
         if title and (url or price is not None):
@@ -556,7 +628,7 @@ def _item_from_json(
     page_url: str,
     category_name: str | None,
 ) -> ScrapedItem | None:
-    title = _clean_title(_first_value(data, ("title", "name")))
+    title = _clean_title(_first_value(data, ("title", "gtitle", "name")))
     if not title:
         return None
 
@@ -568,15 +640,15 @@ def _item_from_json(
     if raw_url and not service_url:
         return None
 
-    description = _first_value(data, ("description", "desc", "text", "shortDescription"))
+    description = _json_description(data, title)
     return ScrapedItem(
         source="kwork",
         url=service_url or page_url,
         title=title,
         price=price,
         currency="RUB" if price is not None else None,
-        description=_normalize_spaces(description) if description else None,
-        category=category_name or _category_name_from_url(page_url),
+        description=description,
+        category=_clean_category_name(category_name) or _category_name_from_url(page_url),
         subcategory=_subcategory_name_from_url(page_url, category_name),
         is_service=True,
         parse_status="success",
@@ -591,6 +663,57 @@ def _first_value(data: dict[str, object], keys: tuple[str, ...]) -> str | None:
             if text:
                 return text
     return None
+
+
+def _json_description(data: dict[str, object], title: str) -> str | None:
+    explicit = _first_value(
+        data,
+        (
+            "description",
+            "desc",
+            "text",
+            "shortDescription",
+            "short_description",
+            "subtitle",
+        ),
+    )
+    if explicit and explicit != title:
+        return _normalize_spaces(explicit)
+
+    parts: list[str] = []
+    seller = _first_value(data, ("userName", "seller", "workerName"))
+    rating = _first_value(data, ("convertedUserRating", "userRating"))
+    reviews = _first_value(data, ("userRatingCount", "reviews", "reviewsCount"))
+    days = _first_value(data, ("days",))
+    queue = _first_value(data, ("queueCount",))
+    volume = _json_volume(data)
+
+    if seller:
+        parts.append(f"продавец {seller}")
+    if rating:
+        rating_text = f"рейтинг {rating}"
+        if reviews:
+            rating_text = f"{rating_text}, отзывов {reviews}"
+        parts.append(rating_text)
+    if days:
+        parts.append(f"срок от {days} дн.")
+    if queue and queue != "0":
+        parts.append(f"в очереди {queue}")
+    if volume:
+        parts.append(volume)
+
+    if not parts:
+        return None
+    description = "Кратко: " + "; ".join(parts)
+    return description if description.endswith((".", "!", "?")) else f"{description}."
+
+
+def _json_volume(data: dict[str, object]) -> str | None:
+    base_volume = _first_value(data, ("baseVolume", "packageVolume"))
+    short_name = _first_value(data, ("baseVolumeShortName",))
+    if not base_volume or not short_name:
+        return None
+    return f"объем {base_volume} {short_name}"
 
 
 def _json_price(data: dict[str, object]) -> Decimal | None:
@@ -737,8 +860,53 @@ def _normalize_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+def _clean_category_name(value: str | None) -> str | None:
+    if not value:
+        return None
+    cleaned = _normalize_spaces(value)
+    cleaned = re.sub(
+        r":\s*услуги\s+.*?\s+от\s+\d[\d\s]*\s*руб\.?\s*[–-]\s*Kwork$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s*[–-]\s*Kwork$", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip(" :-–") or None
+
+
 def _has_smart_captcha(html: str) -> bool:
-    return "isYandexSmartCaptcha" in html or "smartcaptcha.yandexcloud.net" in html
+    lowered = html.casefold()
+    if "smart-captcha" in lowered:
+        return True
+    if "подтвердите, что вы не робот" in lowered and "captcha" in lowered:
+        return True
+    if "captcha-container" in lowered and "yandexsmartcaptcha" in lowered:
+        return True
+    return False
+
+
+def _looks_like_authenticated_kwork_session(html: str, soup: BeautifulSoup) -> bool:
+    if not config.KWORK_COOKIE:
+        return False
+
+    if re.search(r'window\.USER_ID\s*=\s*["\']\d+["\']', html):
+        return True
+    if re.search(r'window\.actorType\s*=\s*["\'][^"\']+["\']', html):
+        return True
+    if _safe_select(soup, "a[href*='/user/'], a[href*='/manage_orders'], a[href*='/manage_kworks'], a[href*='/balance']"):
+        return True
+    if re.search(r'window\.USER_ID\s*=\s*["\']\s*["\']', html):
+        return False
+    if re.search(r"window\.actorType\s*=\s*null", html):
+        return False
+
+    login_markers = (
+        'href="/login"',
+        "href='/login'",
+        "Войти",
+        "Регистрация",
+    )
+    return not any(marker in html for marker in login_markers)
 
 
 def _empty_page_reason(html: str, soup: BeautifulSoup) -> str:

@@ -136,11 +136,13 @@ def init_db(db_path: Path | None = None) -> None:
                 buyer_requirements TEXT,
                 forbidden_buyer_requests TEXT,
                 report_format TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                UNIQUE(source_url)
             )
             """
         )
         _ensure_column(connection, "opportunities", "forbidden_buyer_requests", "TEXT")
+        _ensure_opportunities_unique_index(connection)
 
         connection.execute(
             """
@@ -275,6 +277,31 @@ def _ensure_scraped_items_unique_constraint(connection: sqlite3.Connection) -> N
     )
 
 
+def _ensure_opportunities_unique_index(connection: sqlite3.Connection) -> None:
+    duplicates = connection.execute(
+        """
+        SELECT source_url, COUNT(*) AS count
+        FROM opportunities
+        GROUP BY source_url
+        HAVING COUNT(*) > 1
+        LIMIT 1
+        """
+    ).fetchone()
+    if duplicates is not None:
+        raise RuntimeError(
+            "В таблице opportunities уже есть дубли по source_url. "
+            "Для применения уникального индекса удалите дубли или пересоздайте "
+            "data/processed/analyzer.sqlite."
+        )
+
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_opportunities_source_url
+        ON opportunities(source_url)
+        """
+    )
+
+
 def save_scraped_item(item: ScrapedItem, db_path: Path | None = None) -> int:
     """Сохраняет собранную запись и возвращает ее id."""
 
@@ -371,10 +398,6 @@ def save_opportunity(opportunity: Opportunity, db_path: Path | None = None) -> i
 
     with get_connection(db_path) as connection:
         connection.execute(
-            "DELETE FROM opportunities WHERE source_url = ?",
-            (opportunity.source_url,),
-        )
-        cursor = connection.execute(
             """
             INSERT INTO opportunities (
                 funpay_category_id, source_category, source_subcategory, source_url,
@@ -385,6 +408,32 @@ def save_opportunity(opportunity: Opportunity, db_path: Path | None = None) -> i
                 buyer_requirements, forbidden_buyer_requests, report_format, created_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_url) DO UPDATE SET
+                funpay_category_id = excluded.funpay_category_id,
+                source_category = excluded.source_category,
+                source_subcategory = excluded.source_subcategory,
+                normalized_type = excluded.normalized_type,
+                possible_kwork_service_title = excluded.possible_kwork_service_title,
+                possible_kwork_category = excluded.possible_kwork_category,
+                buy_price = excluded.buy_price,
+                sell_price = excluded.sell_price,
+                estimated_margin_percent = excluded.estimated_margin_percent,
+                risk_level = excluded.risk_level,
+                risk_reason = excluded.risk_reason,
+                moderation_risk = excluded.moderation_risk,
+                dispute_risk = excluded.dispute_risk,
+                demand_weight = excluded.demand_weight,
+                margin_weight = excluded.margin_weight,
+                risk_weight = excluded.risk_weight,
+                opportunity_score = excluded.opportunity_score,
+                verdict = excluded.verdict,
+                recommendation = excluded.recommendation,
+                forbidden_words = excluded.forbidden_words,
+                safe_wording = excluded.safe_wording,
+                buyer_requirements = excluded.buyer_requirements,
+                forbidden_buyer_requests = excluded.forbidden_buyer_requests,
+                report_format = excluded.report_format,
+                created_at = excluded.created_at
             """,
             (
                 opportunity.funpay_category_id,
@@ -415,7 +464,13 @@ def save_opportunity(opportunity: Opportunity, db_path: Path | None = None) -> i
                 opportunity.created_at.isoformat(),
             ),
         )
-        return int(cursor.lastrowid)
+        row = connection.execute(
+            "SELECT id FROM opportunities WHERE source_url = ?",
+            (opportunity.source_url,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(f"Не удалось сохранить opportunity: {opportunity.source_url}")
+        return int(row["id"])
 
 
 def save_funpay_category(category: FunPayCategory, db_path: Path | None = None) -> int:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import re
 import sqlite3
 from typing import Any
 
@@ -97,4 +98,6 @@ def _contains_marker(text: str, marker: str) -> bool:
     normalized_marker = normalize_text(marker)
     if not normalized_marker:
         return False
+    if len(normalized_marker) <= 3:
+        return normalized_marker in set(re.findall(r"[a-zа-яё0-9]+", text))
     return normalized_marker in text

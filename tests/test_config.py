@@ -14,6 +14,8 @@ def _base_config_payload() -> dict[str, object]:
         "ENABLE_KWORK_COLLECTION": True,
         "DRY_RUN": True,
         "MAX_PAGES_PER_RUN": 1,
+        "KWORK_MAX_CATEGORIES": 1000,
+        "KWORK_MAX_PAGES_PER_CATEGORY": 50,
         "LOG_LEVEL": "INFO",
         "KWORK_FEE_PERCENT": 20,
         "WITHDRAWAL_FEE_PERCENT": 0,

@@ -7,6 +7,10 @@ accounts:
     - аккаунт
     - логин
     - пароль
+    - почта
+    - лог:пас
+    - лог:пасс
+    - фулл доступ
 
 keys:
   ru_name: "Ключи"
@@ -119,6 +123,35 @@ content_services:
     - article
     - статья
     - видео
+
+smm_services:
+  ru_name: "SMM и продвижение"
+  risk: yellow
+  markers:
+    - vk
+    - вк
+    - vkontakte
+    - вконтакте
+    - лайки
+    - подписчики
+    - комментарии
+    - репосты
+    - просмотры
+    - голоса
+    - голосования
+    - smm
+    - продвижение
+
+automation_services:
+  ru_name: "Автоматизация и боты"
+  risk: green
+  markers:
+    - бот
+    - боты
+    - скрипт
+    - автоматизация
+    - парсер
+    - api
 
 other:
   ru_name: "Другое"

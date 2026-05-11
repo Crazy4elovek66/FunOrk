@@ -30,6 +30,40 @@ MARKER_ALIASES = {
     "game": {"game", "игра", "игровой"},
     "consulting": {"коучинг", "консультация", "настройка", "помощь"},
     "service": {"сервис", "услуга", "подписка"},
+    "smm": {"smm", "смм", "продвижение", "соцсети", "соцсетей"},
+    "vk": {"vk", "вк", "вконтакте", "vkontakte"},
+    "likes": {"лайк", "лайки", "лайков", "likes"},
+    "followers": {"подписчик", "подписчики", "подписчиков", "followers"},
+    "comments": {"комментарий", "комментарии", "комментариев", "коммент", "комменты", "comments"},
+    "reposts": {"репост", "репосты", "репостов", "repost"},
+    "views": {"просмотр", "просмотры", "просмотров", "views"},
+    "bot": {"бот", "боты", "bot", "bots"},
+    "automation": {"автоматизация", "скрипт", "скрипты", "api", "парсер"},
+}
+TOKEN_STOPWORDS = {
+    "читать",
+    "описание",
+    "цена",
+    "указана",
+    "шт",
+    "штук",
+    "быстро",
+    "быстрый",
+    "гарантия",
+    "качество",
+    "автовыдача",
+    "отзыв",
+    "отзывы",
+    "любой",
+    "любые",
+    "ваш",
+    "ваша",
+    "ваше",
+    "для",
+    "под",
+    "без",
+    "про",
+    "или",
 }
 
 
@@ -92,7 +126,7 @@ def match_funpay_to_kwork(
         token_overlap = funpay_tokens & service_tokens
         marker_overlap = funpay_markers & service_markers
         score = len(token_overlap) + len(marker_overlap) * 2
-        if score <= 0:
+        if score < 3:
             continue
         matches.append(
             {
@@ -145,7 +179,11 @@ def _service_text(item: ScrapedItem) -> str:
 
 def _tokens_for_service(item: ScrapedItem) -> set[str]:
     text = _normalize(_service_text(item))
-    return {token for token in re.findall(r"[a-zа-яё0-9]{3,}", text) if len(token) >= 3}
+    return {
+        token
+        for token in re.findall(r"[a-zа-яё0-9]{3,}", text)
+        if len(token) >= 3 and token not in TOKEN_STOPWORDS
+    }
 
 
 def _markers_for_text(text: str) -> set[str]:

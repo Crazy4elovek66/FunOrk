@@ -164,7 +164,70 @@ def test_funpay_category_parser_collects_features_with_pagination(monkeypatch):
     assert items[0].is_subscription is True
     assert items[0].can_be_done_by_id is True
     assert items[0].requires_login_password is False
+    assert items[0].category == "потребуется только ID профиля"
     assert items[1].is_service is True
+
+
+def test_funpay_parser_splits_lot_title_and_subcategory(monkeypatch):
+    def fake_get_html(self, url, *, source="funpay", force=False):
+        return """
+            <html><body>
+            <a class="tc-item" href="/lots/offer?id=1">
+                <div class="tc-desc-text">VK комментарии живыми людьми, Комментарии</div>
+                <div class="tc-server">VK</div>
+                <div class="tc-price">10 ₽</div>
+            </a>
+            </body></html>
+        """
+
+    monkeypatch.setattr("app.collectors.funpay.HttpClient.get_html", fake_get_html)
+
+    items = parse_category("https://funpay.com/lots/706/")
+
+    assert items[0].title == "VK комментарии живыми людьми"
+    assert items[0].subcategory == "Комментарии"
+    assert items[0].category == "VK"
+
+
+def test_funpay_parser_marks_account_slang_as_red(monkeypatch):
+    def fake_get_html(self, url, *, source="funpay", force=False):
+        return """
+            <html><body>
+            <a class="tc-item" href="/lots/offer?id=3">
+                <div class="tc-desc-text">Продам аккаунт с родной почтой, лог:пасс выдам</div>
+                <div class="tc-server">Аккаунты</div>
+                <div class="tc-price">500 ₽</div>
+            </a>
+            </body></html>
+        """
+
+    monkeypatch.setattr("app.collectors.funpay.HttpClient.get_html", fake_get_html)
+
+    items = parse_category("https://funpay.com/lots/accounts/")
+    risk_level, risk_reason = analyze_risk(items[0])
+
+    assert items[0].requires_login_password is True
+    assert risk_level == "RED"
+    assert "логин" in risk_reason
+
+
+def test_kwork_mapper_recognizes_smm_services():
+    item = ScrapedItem(
+        source="funpay",
+        url="https://funpay.com/lots/offer?id=1",
+        title="VK комментарии живыми людьми",
+        subcategory="Комментарии",
+        category="VK",
+        price=Decimal("10"),
+    )
+
+    risk_level, _ = analyze_risk(item)
+    mapping = map_to_kwork(item, risk_level)
+
+    assert risk_level == "YELLOW"
+    assert mapping is not None
+    assert mapping["normalized_type"] == "smm_services"
+    assert mapping["kwork_category"] == "Соцсети и SMM"
 
 
 def test_kwork_catalog_bfs_returns_only_leaf_categories(monkeypatch):

@@ -3,11 +3,16 @@ from decimal import Decimal
 from bs4 import BeautifulSoup
 
 from app.collectors.kwork import (
+    KWORK_SESSION_ERROR,
+    SessionValidationError,
     extract_kwork_services_from_dom,
     extract_kwork_services_from_json_scripts,
     extract_kwork_services_from_links,
+    collect_catalog,
     parse_kwork_category,
+    verify_kwork_session,
 )
+from app.collectors.http_client import AntiBanError
 
 
 def test_kwork_parser_extracts_data_id_card():
@@ -102,6 +107,62 @@ def test_kwork_parser_extracts_json_script():
     assert items[0].price == Decimal("3500")
 
 
+def test_kwork_parser_extracts_window_state_data():
+    soup = BeautifulSoup(
+        """
+        <script>
+        window.stateData={"viewData":{"kworks":{"data":[
+            {
+                "id":27095427,
+                "url":"/website-repair/27095427/dorabotka-na-django",
+                "gtitle":"Доработка на Django",
+                "price":1000,
+                "userName":"pyaidev",
+                "convertedUserRating":"4.9",
+                "userRatingCount":"225",
+                "days":1
+            }
+        ]}}};
+        </script>
+        """,
+        "html.parser",
+    )
+
+    items = extract_kwork_services_from_json_scripts(
+        soup,
+        "https://kwork.ru/categories/website-repair",
+        "Доработка сайта",
+    )
+
+    assert len(items) == 1
+    assert items[0].title == "Доработка на Django"
+    assert items[0].url == "https://kwork.ru/website-repair/27095427/dorabotka-na-django"
+    assert items[0].price == Decimal("1000")
+    assert items[0].description == "Кратко: продавец pyaidev; рейтинг 4.9, отзывов 225; срок от 1 дн."
+
+
+def test_kwork_parser_cleans_seo_category_suffix():
+    soup = BeautifulSoup(
+        """
+        <title>Создание сайта: услуги фрилансеров от 500 руб. – Kwork</title>
+        <script>
+        window.stateData={"viewData":{"kworks":{"data":[
+            {"url":"/website/1/site","gtitle":"Сайт под ключ","price":500,"userName":"dev"}
+        ]}}};
+        </script>
+        """,
+        "html.parser",
+    )
+
+    items = extract_kwork_services_from_json_scripts(
+        soup,
+        "https://kwork.ru/categories/website",
+        "Создание сайта: услуги фрилансеров от 500 руб. – Kwork",
+    )
+
+    assert items[0].category == "Создание сайта"
+
+
 def test_kwork_parser_marks_empty_page_parse_failed(monkeypatch, tmp_path):
     debug_paths = []
 
@@ -123,11 +184,11 @@ def test_kwork_parser_marks_empty_page_parse_failed(monkeypatch, tmp_path):
     assert debug_paths
 
 
-def test_kwork_parser_marks_smartcaptcha(monkeypatch, tmp_path):
+def test_kwork_parser_stops_on_smartcaptcha(monkeypatch, tmp_path):
     debug_paths = []
 
     def fake_get_html(self, url, *, source="kwork", force=False):
-        return "<html><script>window.isYandexSmartCaptcha=true</script></html>"
+        return '<html><div class="smart-captcha">Подтвердите, что вы не робот</div></html>'
 
     def fake_save_debug(url, html, reason):
         debug_paths.append((url, reason))
@@ -136,9 +197,55 @@ def test_kwork_parser_marks_smartcaptcha(monkeypatch, tmp_path):
     monkeypatch.setattr("app.collectors.kwork.HttpClient.get_html", fake_get_html)
     monkeypatch.setattr("app.collectors.kwork.save_kwork_debug_html", fake_save_debug)
 
-    category, items = parse_kwork_category("https://kwork.ru/categories/design")
+    try:
+        parse_kwork_category("https://kwork.ru/categories/design")
+    except AntiBanError as error:
+        assert "SmartCaptcha" in str(error)
+    else:
+        raise AssertionError("parse_kwork_category должен прерываться при SmartCaptcha")
 
-    assert items == []
-    assert category.parse_status == "parse_failed"
-    assert "SmartCaptcha" in category.parse_error
     assert debug_paths
+
+
+def test_verify_kwork_session_uses_uncached_request_and_detects_login(monkeypatch):
+    calls = []
+
+    def fake_get_html(self, url, *, source="kwork", force=False):
+        calls.append((url, source, force))
+        return '<html><script>window.USER_ID = "12345";</script><a href="/user/test">Профиль</a></html>'
+
+    monkeypatch.setattr("app.collectors.kwork.HttpClient.get_html", fake_get_html)
+    monkeypatch.setattr("app.collectors.kwork.config.KWORK_COOKIE", "session=alive")
+
+    assert verify_kwork_session() is True
+    assert calls == [("https://kwork.ru", "kwork", True)]
+
+
+def test_verify_kwork_session_falls_back_to_seller_page(monkeypatch):
+    calls = []
+
+    def fake_get_html(self, url, *, source="kwork", force=False):
+        calls.append((url, source, force))
+        if url == "https://kwork.ru":
+            return '<html><script>window.USER_ID = "";</script></html>'
+        return '<html><script>window.USER_ID = "12345"; window.actorType="worker";</script></html>'
+
+    monkeypatch.setattr("app.collectors.kwork.HttpClient.get_html", fake_get_html)
+    monkeypatch.setattr("app.collectors.kwork.config.KWORK_COOKIE", "session=alive")
+
+    assert verify_kwork_session() is True
+    assert calls == [
+        ("https://kwork.ru", "kwork", True),
+        ("https://kwork.ru/seller", "kwork", True),
+    ]
+
+
+def test_collect_catalog_fails_fast_when_session_is_invalid(monkeypatch):
+    monkeypatch.setattr("app.collectors.kwork.verify_kwork_session", lambda force=True: False)
+
+    try:
+        collect_catalog(force=True, limit=1)
+    except SessionValidationError as error:
+        assert str(error) == KWORK_SESSION_ERROR
+    else:
+        raise AssertionError("collect_catalog должен прерываться до обхода каталога")

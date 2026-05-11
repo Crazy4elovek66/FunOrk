@@ -39,7 +39,9 @@ def test_kwork_cookie_is_sent_only_for_kwork(monkeypatch):
     client.get_html("https://kwork.ru/categories/test", source="kwork")
     client.get_html("https://funpay.com/lots/test", source="funpay")
 
-    assert session.calls[0][1]["headers"] == {"Cookie": "sessionid=test-cookie"}
+    assert session.calls[0][1]["headers"]["Cookie"] == "sessionid=test-cookie"
+    assert session.calls[0][1]["headers"]["Referer"] == "https://kwork.ru/seller"
+    assert session.calls[0][1]["headers"]["Accept-Language"].startswith("ru-RU")
     assert session.calls[1][1]["headers"] == {}
 
 
@@ -52,12 +54,15 @@ def test_empty_kwork_cookie_is_not_sent(monkeypatch):
 
     HttpClient(session=session).get_html("https://kwork.ru/categories/test", source="kwork")
 
-    assert session.calls[0][1]["headers"] == {}
+    assert "Cookie" not in session.calls[0][1]["headers"]
+    assert session.calls[0][1]["headers"]["Sec-Fetch-Mode"] == "navigate"
 
 
 def test_yandex_smartcaptcha_raises_antiban_before_cache(monkeypatch):
     session = DummySession(
-        response=DummyResponse("<html><script>window.isYandexSmartCaptcha = true</script></html>")
+        response=DummyResponse(
+            '<html><div class="smart-captcha">Подтвердите, что вы не робот</div></html>'
+        )
     )
     cache_spy = CacheSpy()
     monkeypatch.setattr(http_client.config, "KWORK_COOKIE", "sessionid=test-cookie")

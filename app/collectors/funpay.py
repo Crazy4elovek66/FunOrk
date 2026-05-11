@@ -132,6 +132,7 @@ def _parse_lot_row(row: Tag, category_url: str) -> ScrapedItem | None:
     title = _normalize_spaces(title)
     if not title:
         return None
+    title, subcategory = _split_title_subcategory(title)
 
     price_text = _extract_text(row, LOTS_SELECTORS["lot_price"])
     price, currency = _parse_price(price_text)
@@ -145,7 +146,8 @@ def _parse_lot_row(row: Tag, category_url: str) -> ScrapedItem | None:
         price=price,
         currency=currency,
         description=description,
-        category=category_url,
+        category=_extract_category_name(row, category_url),
+        subcategory=subcategory,
         requires_login_password=features["requires_login_password"],
         can_be_done_by_id=features["can_be_done_by_id"],
         is_code_or_key=features["is_code_or_key"],
@@ -179,6 +181,32 @@ def collect_catalog(
         if len(urls) >= limit:
             break
     return urls
+
+
+def _split_title_subcategory(title: str) -> tuple[str, str | None]:
+    parts = [_normalize_spaces(part) for part in title.rsplit(",", 1)]
+    if len(parts) != 2:
+        return title, None
+    name, maybe_subcategory = parts
+    if not name or not maybe_subcategory:
+        return title, None
+    if len(maybe_subcategory) > 40:
+        return title, None
+    return name, maybe_subcategory
+
+
+def _extract_category_name(row: Tag, category_url: str) -> str:
+    candidates: list[str] = []
+    for selector in (".tc-server", ".tc-game", ".game-title", ".breadcrumb a", ".breadcrumbs a"):
+        text = _extract_text(row, selector)
+        if text:
+            candidates.append(text)
+    for candidate in candidates:
+        cleaned = _normalize_spaces(candidate)
+        if cleaned and not _looks_like_price(cleaned):
+            return cleaned
+    slug = category_url.rstrip("/").split("/")[-1]
+    return f"FunPay {slug}" if slug else "FunPay"
 
 
 def _detect_features(row: Tag, title: str, description: str | None) -> dict[str, bool]:
@@ -252,6 +280,14 @@ def _requires_credentials(text: str) -> bool:
         (
             "логин",
             "пароль",
+            "лог:пас",
+            "лог:пасс",
+            "лог пас",
+            "лог пасс",
+            "родная почта",
+            "фулл доступ",
+            "полный доступ",
+            "с почтой",
             "аккаунт",
             "account",
             "login",
@@ -321,6 +357,10 @@ def _parse_price(value: str | None) -> tuple[Decimal | None, str | None]:
     return None, None
 
 
+def _looks_like_price(value: str) -> bool:
+    return bool(re.search(r"\d", value) and re.search(r"(₽|руб|rub|usd|eur|\$|€)", value, re.IGNORECASE))
+
+
 def _normalize_currency(value: str | None) -> str | None:
     if not value:
         return None
@@ -352,6 +392,8 @@ def _contains_marker(text: str, marker: str) -> bool:
     normalized_marker = _normalize_spaces(marker).casefold()
     if not normalized_marker:
         return False
+    if len(normalized_marker) <= 3:
+        return normalized_marker in set(re.findall(r"[a-zа-яё0-9]+", text))
     return normalized_marker in text
 
 

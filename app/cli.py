@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -48,6 +49,9 @@ from app.reports.export_html import export_to_html
 from app.reports.export_xlsx import export_to_xlsx
 
 
+logger = logging.getLogger(__name__)
+
+
 class PipelineSummary(TypedDict):
     scraped: int
     saved: int
@@ -78,7 +82,22 @@ def collect_funpay(force: bool = False) -> int:
             parse_status="pending",
         )
         save_funpay_category(category)
-        saved += 1
+        try:
+            items = parse_category(url, force=force)
+        except (AntiBanError, HttpClientError) as error:
+            items = [_failed_scraped_item(url, str(error))]
+        for item in items:
+            save_scraped_item(item)
+            if item.parse_status != "success" and item.parse_error:
+                save_parse_error(
+                    ParseError(
+                        source=item.source,
+                        url=item.url,
+                        status=item.parse_status,
+                        error=item.parse_error,
+                    )
+                )
+            saved += 1
     return saved
 
 
@@ -86,7 +105,7 @@ def collect_kwork(force: bool = False) -> int:
     init_db()
     categories, items = collect_kwork_catalog(
         force=force,
-        limit=config.MAX_PAGES_PER_RUN,
+        limit=config.KWORK_MAX_CATEGORIES,
     )
     for category in categories:
         save_kwork_category(category)
@@ -199,16 +218,17 @@ def _analyze_item(
             mapping_data = {}
         if matches:
             first_service = matches[0]["service"]
-            mapping_data.setdefault("service_title", first_service.title)
-            mapping_data.setdefault("kwork_category", first_service.category)
+            mapping_data["service_title"] = _adapt_funpay_title(item, first_service)
+            mapping_data["kwork_category"] = first_service.category
             mapping_data["average_price"] = demand["avg_kwork_price"]
             mapping_data["min_price"] = demand["min_kwork_price"]
             mapping_data["safe_wording"] = (
-                f"На Kwork найдены похожие услуги: {len(matches)}. "
-                "Формулируйте предложение как помощь, настройку или консультацию без запроса доступов."
+                f"На Kwork найдено похожих услуг: {len(matches)}. "
+                f"Ближайший ориентир: «{first_service.title}». "
+                "Формулируйте предложение как помощь, настройку, продвижение или консультацию без запроса доступов."
             )
             mapping_data["recommendation"] = (
-                "Проверить найденные услуги Kwork, взять цену и формулировку как ориентир, "
+                "Проверить ближайшие услуги Kwork, взять цену и формулировку как ориентир, "
                 "но не обещать результат, требующий доступа к аккаунту покупателя."
             )
     return score_opportunity(
@@ -218,6 +238,15 @@ def _analyze_item(
         mapping_data=mapping_data,
         demand_score=demand_score,
     )
+
+
+def _adapt_funpay_title(item: ScrapedItem, kwork_service: ScrapedItem) -> str:
+    base = item.title.strip(" .")
+    if item.subcategory:
+        base = f"{base} ({item.subcategory})"
+    if len(base) > 90:
+        base = base[:87].rstrip() + "..."
+    return f"Адаптировать FunPay-лот: {base}. Ориентир Kwork: {kwork_service.title}"
 
 
 def _save_opportunity_compat(opportunity: Opportunity) -> None:
@@ -324,32 +353,32 @@ def main() -> None:
     try:
         if args.command == "collect-funpay":
             processed = collect_funpay(force=args.force)
-            print(f"Каталог FunPay сохранен: {processed} категорий.")
+            logger.info("Каталог FunPay сохранен: %s категорий.", processed)
         elif args.command == "collect-kwork":
             processed = collect_kwork(force=args.force)
-            print(f"Каталог Kwork сохранен: {processed} категорий.")
+            logger.info("Каталог Kwork сохранен: %s категорий.", processed)
         elif args.command == "analyze":
             processed = analyze_saved_items()
-            print(f"Анализ завершен: {processed} направлений.")
+            logger.info("Анализ завершен: %s направлений.", processed)
         elif args.command == "export":
             path = export_report(args.format)
             processed = 1
-            print(f"Отчет сохранен: {path}")
+            logger.info("Отчет сохранен: %s", path)
         elif args.command == "run-all":
             processed += collect_funpay(force=args.force)
             processed += collect_kwork(force=args.force)
             processed += analyze_saved_items()
             path = export_report(args.format)
-            print(f"Полный цикл завершен. Отчет сохранен: {path}")
+            logger.info("Полный цикл завершен. Отчет сохранен: %s", path)
         elif args.command == "dry-run":
             processed = 1
-            print(dry_run())
+            logger.info(dry_run())
         elif args.command == "import-funpay":
             processed = import_funpay_file(Path(args.file))
-            print(f"Импорт FunPay завершен: {processed} записей.")
+            logger.info("Импорт FunPay завершен: %s записей.", processed)
         elif args.command == "import-kwork":
             processed = import_kwork_file(Path(args.file))
-            print(f"Импорт Kwork завершен: {processed} записей.")
+            logger.info("Импорт Kwork завершен: %s записей.", processed)
         else:
             parser.error("Неизвестная команда")
 
@@ -371,6 +400,7 @@ def main() -> None:
                 error=str(error),
             )
         )
+        logger.exception("Команда %s завершилась с ошибкой", args.command or "unknown")
         raise
 
 
@@ -382,7 +412,7 @@ def _run_legacy_mode(parser: argparse.ArgumentParser, args: argparse.Namespace) 
 
     if args.url:
         summary = run_pipeline(args.url)
-        print(
+        logger.info(
             "Готово: "
             f"получено {summary['scraped']}, "
             f"сохранено {summary['saved']}, "
@@ -392,9 +422,9 @@ def _run_legacy_mode(parser: argparse.ArgumentParser, args: argparse.Namespace) 
 
     if args.export:
         if not args.url:
-            print("Генерация отчета по накопленной базе...")
+            logger.info("Генерация отчета по накопленной базе...")
         report_path = export_to_csv()
-        print(f"Отчет сохранен: {report_path}")
+        logger.info("Отчет сохранен: %s", report_path)
 
 
 if __name__ == "__main__":

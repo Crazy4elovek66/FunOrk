@@ -1,8 +1,15 @@
 import csv
 
-from app.db import fetch_kwork_categories, fetch_scraped_items, init_db, save_scraped_item
+from app.db import (
+    fetch_kwork_categories,
+    fetch_opportunities,
+    fetch_scraped_items,
+    init_db,
+    save_opportunity,
+    save_scraped_item,
+)
 from app.importers import import_funpay_file, import_kwork_file
-from app.models import ScrapedItem
+from app.models import Opportunity, ScrapedItem
 
 
 def test_import_funpay_csv(tmp_path, monkeypatch):
@@ -117,3 +124,41 @@ def test_fetch_scraped_items_filters_source_and_limit(tmp_path):
 
     assert len(rows) == 1
     assert rows[0]["source"] == "kwork"
+
+
+def test_save_opportunity_updates_existing_source_url(tmp_path):
+    db_path = tmp_path / "analyzer.sqlite"
+    init_db(db_path)
+
+    source_url = "https://funpay.com/lots/test/1/"
+    first_id = save_opportunity(
+        Opportunity(
+            source_category="FunPay",
+            source_url=source_url,
+            normalized_type="services",
+            risk_level="YELLOW",
+            risk_reason="Нужна ручная проверка",
+            verdict="Проверить",
+            opportunity_score=40,
+        ),
+        db_path,
+    )
+    second_id = save_opportunity(
+        Opportunity(
+            source_category="FunPay",
+            source_url=source_url,
+            normalized_type="services",
+            possible_kwork_service_title="Настройка профиля",
+            risk_level="GREEN",
+            risk_reason="Без передачи доступов",
+            verdict="Можно адаптировать",
+            opportunity_score=82,
+        ),
+        db_path,
+    )
+
+    rows = fetch_opportunities(db_path)
+    assert first_id == second_id
+    assert len(rows) == 1
+    assert rows[0]["verdict"] == "Можно адаптировать"
+    assert rows[0]["opportunity_score"] == 82
