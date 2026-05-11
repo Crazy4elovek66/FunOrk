@@ -38,17 +38,32 @@ def import_kwork_file(path: Path | str) -> int:
     rows = _read_rows(Path(path))
     imported = 0
     for row in rows:
-        category = KworkCategory(
-            category_name=_required(row, "category_name", fallback="category"),
-            subcategory_name=clean_text(row.get("subcategory_name") or row.get("subcategory")),
-            url=_required(row, "url"),
-            average_price=parse_decimal(row.get("average_price")),
-            min_price=parse_decimal(row.get("min_price")),
-            competitors_count=parse_int(row.get("competitors_count")),
-            keywords=_split_keywords(row.get("keywords")),
-            parse_status="success",
-        )
-        save_kwork_category(category)
+        if clean_text(row.get("title")):
+            item = ScrapedItem(
+                source="kwork",
+                url=_required(row, "url"),
+                title=_required(row, "title"),
+                price=parse_decimal(row.get("price")),
+                currency=clean_text(row.get("currency")) or "RUB",
+                description=clean_text(row.get("description")),
+                category=clean_text(row.get("category") or row.get("category_name")),
+                subcategory=clean_text(row.get("subcategory") or row.get("subcategory_name")),
+                is_service=True,
+                parse_status="success",
+            )
+            save_scraped_item(item)
+        else:
+            category = KworkCategory(
+                category_name=_required(row, "category_name", fallback="category"),
+                subcategory_name=clean_text(row.get("subcategory_name") or row.get("subcategory")),
+                url=_required(row, "url"),
+                average_price=parse_decimal(row.get("average_price")),
+                min_price=parse_decimal(row.get("min_price")),
+                competitors_count=parse_int(row.get("competitors_count")),
+                keywords=_split_keywords(row.get("keywords")),
+                parse_status="success",
+            )
+            save_kwork_category(category)
         imported += 1
     return imported
 

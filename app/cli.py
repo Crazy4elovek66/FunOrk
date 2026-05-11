@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import TypedDict
 
 from app.analyzers.kwork_mapper import map_to_kwork
+from app.analyzers.kwork_matcher import (
+    build_kwork_index,
+    calculate_demand_from_matches,
+    load_kwork_services,
+    match_funpay_to_kwork,
+)
 from app.analyzers.opportunity_scorer import score_opportunity
 from app.analyzers.risk_classifier import analyze_risk
 from app.collectors.funpay import collect_catalog as collect_funpay_catalog
@@ -29,7 +35,14 @@ from app.db import (
     save_scraped_item,
 )
 from app.importers import import_funpay_file, import_kwork_file
-from app.models import AnalysisResult, FunPayCategory, Opportunity, ParseError, RunHistory, ScrapedItem
+from app.models import (
+    AnalysisResult,
+    FunPayCategory,
+    Opportunity,
+    ParseError,
+    RunHistory,
+    ScrapedItem,
+)
 from app.reports.export_csv import export_to_csv
 from app.reports.export_html import export_to_html
 from app.reports.export_xlsx import export_to_xlsx
@@ -77,21 +90,41 @@ def collect_kwork(force: bool = False) -> int:
     )
     for category in categories:
         save_kwork_category(category)
+        if category.parse_status != "success" and category.parse_error:
+            save_parse_error(
+                ParseError(
+                    source="kwork",
+                    url=category.url,
+                    status=category.parse_status,
+                    error=category.parse_error,
+                )
+            )
     for item in items:
-        save_scraped_item(item)
+        if item.source == "kwork" and item.parse_status == "success" and item.title:
+            save_scraped_item(item)
+        elif item.parse_status != "success" and item.parse_error:
+            save_parse_error(
+                ParseError(
+                    source="kwork",
+                    url=item.url,
+                    status=item.parse_status,
+                    error=item.parse_error,
+                )
+            )
     return len(categories)
 
 
 def analyze_saved_items() -> int:
     init_db()
     analyzed = 0
+    kwork_index = build_kwork_index(load_kwork_services())
     for row in fetch_scraped_items():
         item = _scraped_item_from_row(row)
         if item.source != "funpay":
             continue
         if item.parse_status != "success":
             continue
-        opportunity = _analyze_item(item)
+        opportunity = _analyze_item(item, kwork_index)
         _save_opportunity_compat(opportunity)
         save_analysis_result(_analysis_result_from_opportunity(item.id or 0, opportunity))
         analyzed += 1
@@ -123,6 +156,7 @@ def _save_and_analyze_items(scraped_items: list[ScrapedItem]) -> PipelineSummary
         "analyzed": 0,
         "skipped": 0,
     }
+    kwork_index = build_kwork_index(load_kwork_services())
 
     for item in scraped_items:
         item_id = save_scraped_item(item)
@@ -142,7 +176,7 @@ def _save_and_analyze_items(scraped_items: list[ScrapedItem]) -> PipelineSummary
             continue
 
         item.id = item_id
-        opportunity = _analyze_item(item)
+        opportunity = _analyze_item(item, kwork_index)
         _save_opportunity_compat(opportunity)
         save_analysis_result(_analysis_result_from_opportunity(item_id, opportunity))
         summary["analyzed"] += 1
@@ -150,14 +184,39 @@ def _save_and_analyze_items(scraped_items: list[ScrapedItem]) -> PipelineSummary
     return summary
 
 
-def _analyze_item(item: ScrapedItem) -> Opportunity:
+def _analyze_item(
+    item: ScrapedItem,
+    kwork_index: list[dict[str, object]] | None = None,
+) -> Opportunity:
     risk_level, risk_reason = analyze_risk(item)
     mapping_data = map_to_kwork(item, risk_level)
+    demand_score = None
+    if kwork_index and risk_level != "RED":
+        matches = match_funpay_to_kwork(item, kwork_index)
+        demand = calculate_demand_from_matches(matches)
+        demand_score = float(demand["demand_weight"])
+        if mapping_data is None:
+            mapping_data = {}
+        if matches:
+            first_service = matches[0]["service"]
+            mapping_data.setdefault("service_title", first_service.title)
+            mapping_data.setdefault("kwork_category", first_service.category)
+            mapping_data["average_price"] = demand["avg_kwork_price"]
+            mapping_data["min_price"] = demand["min_kwork_price"]
+            mapping_data["safe_wording"] = (
+                f"На Kwork найдены похожие услуги: {len(matches)}. "
+                "Формулируйте предложение как помощь, настройку или консультацию без запроса доступов."
+            )
+            mapping_data["recommendation"] = (
+                "Проверить найденные услуги Kwork, взять цену и формулировку как ориентир, "
+                "но не обещать результат, требующий доступа к аккаунту покупателя."
+            )
     return score_opportunity(
         item=item,
         risk_level=risk_level,
         risk_reason=risk_reason,
         mapping_data=mapping_data,
+        demand_score=demand_score,
     )
 
 

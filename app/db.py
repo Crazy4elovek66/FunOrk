@@ -601,7 +601,7 @@ def fetch_scraped_items(
     limit: int | None = None,
 ) -> list[sqlite3.Row]:
     if limit is not None and limit < 0:
-        raise ValueError("Р›РёРјРёС‚ Р·Р°РїРёСЃРµР№ РЅРµ РјРѕР¶РµС‚ Р±С‹С‚СЊ РѕС‚СЂРёС†Р°С‚РµР»СЊРЅС‹Рј")
+        raise ValueError("Лимит записей не может быть отрицательным")
 
     query = """
         SELECT *

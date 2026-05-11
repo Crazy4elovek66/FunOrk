@@ -1,14 +1,18 @@
-﻿"""Сбор публичных категорий Kwork через sitemap/catalog и глубокий парсинг листинга."""
+"""Сбор публичных категорий и услуг Kwork без обхода защит сайта."""
 
 from __future__ import annotations
 
+import json
 import re
 from collections import deque
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from xml.etree import ElementTree
 
 from bs4 import BeautifulSoup, Tag
+from soupsieve import SelectorSyntaxError
 
 from app.collectors.http_client import AntiBanError, HttpClient, HttpClientError
 from app.config import config
@@ -17,6 +21,14 @@ from app.selectors.kwork_selectors import BLOCKED_URL_PARTS, KWORK_CARD_SELECTOR
 
 
 KWORK_CATEGORIES_SITEMAP_URL = "https://kwork.ru/sitemap/market_ru/sitemap_categories.xml"
+KWORK_CAPTCHA_ERROR = (
+    "Kwork вернул SmartCaptcha. Парсинг requests невозможен. "
+    "Добавьте актуальный KWORK_COOKIE или используйте ручной импорт."
+)
+KWORK_SERVICE_URL_RE = re.compile(
+    r"^(?:https?://kwork\.ru)?/[^/?#]+/\d+/[^/?#]+",
+    re.IGNORECASE,
+)
 
 
 def collect_catalog(
@@ -43,7 +55,7 @@ def parse_kwork_category(
     force: bool = False,
     max_pages: int | None = None,
 ) -> tuple[KworkCategory, list[ScrapedItem]]:
-    """Загружает листинг Kwork и возвращает метрики конкуренции по категории."""
+    """Загружает листинг Kwork и извлекает реальные карточки услуг."""
 
     client = HttpClient()
     pages_limit = max(1, min(max_pages or config.MAX_PAGES_PER_RUN, 5))
@@ -52,8 +64,9 @@ def parse_kwork_category(
     prices: list[Decimal] = []
     keywords: list[str] = []
     items: list[ScrapedItem] = []
-    competitors_count = 0
     category_name: str | None = None
+    last_html = ""
+    last_reason = "услуги Kwork не найдены"
 
     try:
         for _ in range(pages_limit):
@@ -63,62 +76,57 @@ def parse_kwork_category(
             seen_pages.add(normalized_page_url)
 
             html = client.get_html(current_url, source="kwork", force=force)
+            last_html = html
             soup = BeautifulSoup(html, "html.parser")
             category_name = category_name or _extract_category_name(soup, url)
 
-            cards = [
-                card
-                for card in soup.select(KWORK_CARD_SELECTORS["kwork_card"])
-                if isinstance(card, Tag) and _looks_like_kwork_card(card)
-            ]
-            competitors_count += len(cards)
+            if _has_smart_captcha(html):
+                save_kwork_debug_html(current_url, html, "найдена SmartCaptcha")
+                return _failed_category(url, "parse_failed", KWORK_CAPTCHA_ERROR, category_name=category_name), []
 
-            for card in cards:
-                price = _parse_price(
-                    _extract_text(card, KWORK_CARD_SELECTORS["kwork_price"])
-                )
-                if price is not None:
-                    prices.append(price)
-                title = _extract_text(card, KWORK_CARD_SELECTORS["kwork_title"])
-                item_url = _extract_card_url(
-                    card,
-                    KWORK_CARD_SELECTORS["kwork_url"],
-                    current_url,
-                )
-                if title and item_url:
-                    items.append(
-                        ScrapedItem(
-                            source="kwork",
-                            url=item_url,
-                            title=title,
-                            price=price,
-                            category=category_name or _category_name_from_url(url),
-                            parse_status="success",
-                        )
-                    )
-                keywords.extend(
-                    _extract_keywords(card, KWORK_CARD_SELECTORS["kwork_keywords"])
-                )
-
-            keywords.extend(
-                _extract_keywords(soup, KWORK_CARD_SELECTORS["filter_keywords"])
+            page_items = _dedupe_items(
+                [
+                    *extract_kwork_services_from_dom(soup, current_url, category_name),
+                    *extract_kwork_services_from_links(soup, current_url, category_name),
+                    *extract_kwork_services_from_json_scripts(soup, current_url, category_name),
+                ]
             )
+            if not page_items:
+                last_reason = _empty_page_reason(html, soup)
+
+            for item in page_items:
+                if _is_valid_kwork_service(item):
+                    items.append(item)
+                    if item.price is not None:
+                        prices.append(item.price)
+
+            keywords.extend(_extract_keywords(soup, KWORK_CARD_SELECTORS["filter_keywords"]))
+            keywords.extend(_extract_keywords(soup, KWORK_CARD_SELECTORS["kwork_keywords"]))
+            for item in page_items:
+                if item.title:
+                    keywords.extend(_keywords_from_text(item.title))
+
             next_url = _find_next_page_url(soup, current_url, seen_pages)
             if not next_url:
                 break
             current_url = next_url
-    except AntiBanError:
-        raise
+    except AntiBanError as error:
+        html = getattr(error, "html", None)
+        if html:
+            save_kwork_debug_html(current_url, html, "найдена SmartCaptcha")
+        return _failed_category(url, "parse_failed", KWORK_CAPTCHA_ERROR, category_name=category_name), []
     except HttpClientError as error:
-        return _failed_category(url, "request_failed", str(error)), []
+        return _failed_category(url, "request_failed", str(error), category_name=category_name), []
 
-    if competitors_count == 0:
+    items = _dedupe_items(items)
+    if not items:
+        if last_html:
+            save_kwork_debug_html(url, last_html, last_reason)
         return (
             _failed_category(
                 url,
                 "parse_failed",
-                "Карточки не найдены. Возможно, изменилась верстка сайта или "
-                "требуется проверка браузера (капча).",
+                last_reason,
                 category_name=category_name,
             ),
             [],
@@ -127,15 +135,117 @@ def parse_kwork_category(
     return (
         KworkCategory(
             category_name=category_name or _category_name_from_url(url),
+            subcategory_name=_subcategory_name_from_url(url, category_name),
             url=url,
             average_price=_average_price(prices),
             min_price=min(prices) if prices else None,
-            competitors_count=competitors_count,
+            competitors_count=len(items),
             keywords=_unique_keywords(keywords),
             parse_status="success",
         ),
         items,
     )
+
+
+def extract_kwork_services_from_dom(
+    soup: BeautifulSoup,
+    page_url: str,
+    category_name: str | None,
+) -> list[ScrapedItem]:
+    """Извлекает услуги из явных карточек листинга Kwork."""
+
+    services: list[ScrapedItem] = []
+    for card in _safe_select(soup, KWORK_CARD_SELECTORS["kwork_card"]):
+        if not isinstance(card, Tag) or not _looks_like_kwork_card(card):
+            continue
+        item = _item_from_container(card, page_url, category_name)
+        if item is not None:
+            services.append(item)
+    return services
+
+
+def extract_kwork_services_from_links(
+    soup: BeautifulSoup,
+    page_url: str,
+    category_name: str | None,
+) -> list[ScrapedItem]:
+    """Ищет ссылки на услуги Kwork и поднимается к ближайшему контейнеру карточки."""
+
+    services: list[ScrapedItem] = []
+    for link in _safe_select(soup, "a[href]"):
+        if not isinstance(link, Tag):
+            continue
+        href = str(link.get("href") or "")
+        service_url = _normalize_kwork_service_url(urljoin(page_url, href))
+        if not service_url:
+            continue
+        container = _nearest_service_container(link)
+        item = _item_from_container(container or link, page_url, category_name, service_url=service_url)
+        if item is not None:
+            services.append(item)
+    return services
+
+
+def extract_kwork_services_from_json_scripts(
+    soup: BeautifulSoup,
+    page_url: str,
+    category_name: str | None,
+) -> list[ScrapedItem]:
+    """Извлекает услуги из JSON-скриптов и встроенных JSON-фрагментов."""
+
+    services: list[ScrapedItem] = []
+    for script in soup.find_all("script"):
+        if not isinstance(script, Tag):
+            continue
+        text = script.string or script.get_text() or ""
+        if not text.strip():
+            continue
+        for payload in _json_payloads_from_script(text):
+            for candidate in _walk_json_services(payload):
+                item = _item_from_json(candidate, page_url, category_name)
+                if item is not None:
+                    services.append(item)
+    return _dedupe_items(services)
+
+
+def save_kwork_debug_html(url: str, html: str, reason: str) -> Path:
+    """Сохраняет HTML и краткую диагностику страницы Kwork."""
+
+    debug_dir = config.DATA_DIR / "debug" / "kwork"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    slug = _slug_from_url(url)
+    html_path = debug_dir / f"kwork_debug_{timestamp}_{slug}.html"
+    summary_path = debug_dir / f"kwork_debug_{timestamp}_{slug}.txt"
+
+    soup = BeautifulSoup(html, "html.parser")
+    link_count = len(
+        [
+            link
+            for link in _safe_select(soup, "a[href]")
+            if _is_kwork_service_url(urljoin(url, str(link.get("href") or "")))
+        ]
+    )
+    script_count = len(soup.find_all("script"))
+    price_like_count = len(re.findall(r"\b\d[\d\s.,]*(?:₽|руб|р\.|kwork)\b", html, re.IGNORECASE))
+
+    html_path.write_text(html, encoding="utf-8")
+    summary_path.write_text(
+        "\n".join(
+            [
+                f"URL: {url}",
+                f"Причина: {reason}",
+                f"Длина HTML: {len(html)}",
+                f"Ссылок /kwork/: {link_count}",
+                f"script-тегов: {script_count}",
+                f"price-like текстов: {price_like_count}",
+                f"SmartCaptcha: {'да' if _has_smart_captcha(html) else 'нет'}",
+                f"KWORK_COOKIE: {'задан' if config.KWORK_COOKIE else 'KWORK_COOKIE не задан'}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return html_path
 
 
 def _collect_sitemap_urls(*, force: bool, limit: int) -> list[str]:
@@ -180,12 +290,7 @@ def _collect_catalog_urls(*, force: bool, limit: int) -> list[str]:
             continue
 
         soup = BeautifulSoup(html, "html.parser")
-        cards = [
-            card
-            for card in soup.select(KWORK_CARD_SELECTORS["kwork_card"])
-            if isinstance(card, Tag) and _looks_like_kwork_card(card)
-        ]
-        if cards and _is_category_url(current_url):
+        if extract_kwork_services_from_dom(soup, current_url, _category_name_from_url(current_url)) and _is_category_url(current_url):
             leaf_categories.append(current_url)
             continue
 
@@ -242,18 +347,16 @@ def _is_category_url(url: str) -> bool:
     return True
 
 
-def _category_from_url(url: str) -> KworkCategory:
-    return KworkCategory(
-        category_name=_category_name_from_url(url),
-        url=url,
-        competitors_count=None,
-        parse_status="success",
-    )
-
-
 def _category_name_from_url(url: str) -> str:
     slug = url.rstrip("/").split("/")[-1]
     return re.sub(r"[-_]+", " ", slug).strip().title() or "Категория Kwork"
+
+
+def _subcategory_name_from_url(url: str, category_name: str | None) -> str | None:
+    from_url = _category_name_from_url(url)
+    if category_name and from_url.casefold() == category_name.casefold():
+        return None
+    return from_url
 
 
 def _extract_category_name(soup: BeautifulSoup, url: str) -> str:
@@ -270,13 +373,79 @@ def _extract_category_name(soup: BeautifulSoup, url: str) -> str:
     return _category_name_from_url(url)
 
 
+def _safe_select(parent: Tag | BeautifulSoup, selector: str) -> list[Tag]:
+    try:
+        return [node for node in parent.select(selector) if isinstance(node, Tag)]
+    except SelectorSyntaxError:
+        return []
+
+
 def _looks_like_kwork_card(card: Tag) -> bool:
+    classes = set(card.get("class") or [])
+    if card.get("data-id") and "kwork-card-item" in classes:
+        return True
     if card.get("data-kwork-id"):
         return True
+    for link in card.select("a[href]"):
+        if _is_kwork_service_url(str(link.get("href") or "")):
+            return True
     if card.select_one(KWORK_CARD_SELECTORS["kwork_price"]):
-        return True
-    hrefs = " ".join(str(link.get("href") or "") for link in card.select("a[href]"))
-    return "/kwork/" in hrefs or "/offer/" in hrefs
+        return bool(card.get("data-id") or card.select_one(KWORK_CARD_SELECTORS["kwork_url"]))
+    return False
+
+
+def _item_from_container(
+    container: Tag,
+    page_url: str,
+    category_name: str | None,
+    *,
+    service_url: str | None = None,
+) -> ScrapedItem | None:
+    item_url = service_url or _extract_card_url(container, KWORK_CARD_SELECTORS["kwork_url"], page_url)
+    item_url = _normalize_kwork_service_url(item_url or "")
+    if not item_url:
+        return None
+
+    title = _extract_text(container, KWORK_CARD_SELECTORS["kwork_title"])
+    if not title:
+        link = container if container.name == "a" else _first_service_link(container, page_url)
+        title = _normalize_spaces(link.get_text(" ", strip=True)) if isinstance(link, Tag) else None
+    title = _clean_title(title)
+    if not title:
+        return None
+
+    price_text = _extract_text(container, KWORK_CARD_SELECTORS["kwork_price"])
+    if not price_text:
+        price_text = _extract_generic_price_text(container)
+    price = _parse_price(price_text)
+    description = _build_kwork_description(container)
+    return ScrapedItem(
+        source="kwork",
+        url=item_url,
+        title=title,
+        price=price,
+        currency="RUB" if price is not None else None,
+        description=description,
+        category=category_name or _category_name_from_url(page_url),
+        subcategory=_subcategory_name_from_url(page_url, category_name),
+        is_service=True,
+        parse_status="success",
+    )
+
+
+def _nearest_service_container(link: Tag) -> Tag | None:
+    current: Tag | None = link
+    best: Tag | None = link
+    for _ in range(6):
+        if current is None or not isinstance(current.parent, Tag):
+            break
+        current = current.parent
+        text_len = len(_normalize_spaces(current.get_text(" ", strip=True)))
+        if _looks_like_kwork_card(current):
+            return current
+        if text_len <= 1200 and _first_service_link(current, ""):
+            best = current
+    return best
 
 
 def _extract_text(parent: Tag, selector: str) -> str | None:
@@ -286,36 +455,159 @@ def _extract_text(parent: Tag, selector: str) -> str | None:
     return _normalize_spaces(element.get_text(" ", strip=True))
 
 
+def _first_service_link(parent: Tag, base_url: str) -> Tag | None:
+    for link in parent.select("a[href]"):
+        href = str(link.get("href") or "")
+        candidate = urljoin(base_url, href) if base_url else href
+        if _is_kwork_service_url(candidate):
+            return link
+    return None
+
+
+def _build_kwork_description(container: Tag) -> str | None:
+    parts: list[str] = []
+    seller = _extract_text(container, KWORK_CARD_SELECTORS["kwork_seller"])
+    rating = _extract_text(container, KWORK_CARD_SELECTORS["kwork_rating"])
+    reviews = _extract_text(container, KWORK_CARD_SELECTORS["kwork_reviews"])
+    seller_level = _extract_text(container, KWORK_CARD_SELECTORS["kwork_seller_level"])
+
+    if seller:
+        parts.append(f"Продавец: {seller}")
+    if rating:
+        parts.append(f"рейтинг: {rating}")
+    if reviews:
+        parts.append(f"отзывы: {reviews}")
+    if seller_level:
+        parts.append(f"уровень: {seller_level}")
+
+    return ", ".join(parts) if parts else None
+
+
+def _extract_generic_price_text(container: Tag) -> str | None:
+    for element in container.find_all(string=True):
+        text = _normalize_spaces(str(element))
+        if _looks_like_price(text):
+            return text
+    return None
+
+
 def _extract_card_url(parent: Tag, selector: str, base_url: str) -> str | None:
     elements = parent.select(selector) if selector else []
-    if not elements:
-        return None
-
-    fallback_href: str | None = None
     for element in elements:
         if not isinstance(element, Tag):
             continue
         href = element.get("href")
-        if not href:
-            continue
-        href = str(href)
-        if "/kwork/" in href or "/offer/" in href:
-            return _normalize_url(urljoin(base_url, href))
-        fallback_href = fallback_href or href
-
-    href = fallback_href
-    if not href:
-        return None
-    return _normalize_url(urljoin(base_url, href))
+        normalized_url = _normalize_url(urljoin(base_url, str(href or "")))
+        if _is_kwork_service_url(normalized_url):
+            return normalized_url
+    return None
 
 
 def _extract_keywords(parent: Tag | BeautifulSoup, selector: str) -> list[str]:
     values: list[str] = []
-    for element in parent.select(selector):
+    for element in _safe_select(parent, selector):
         text = _normalize_spaces(element.get_text(" ", strip=True))
         if 2 <= len(text) <= 40 and not _looks_like_price(text):
             values.append(text)
     return values
+
+
+def _json_payloads_from_script(text: str) -> list[object]:
+    payloads: list[object] = []
+    stripped = text.strip()
+    if not stripped:
+        return payloads
+    if stripped[0] in "[{":
+        try:
+            return [json.loads(stripped)]
+        except json.JSONDecodeError:
+            pass
+
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"[\[{]", stripped):
+        try:
+            payload, _ = decoder.raw_decode(stripped[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        payloads.append(payload)
+        if len(payloads) >= 50:
+            break
+    return payloads
+
+
+def _walk_json_services(value: object) -> list[dict[str, object]]:
+    services: list[dict[str, object]] = []
+    if isinstance(value, dict):
+        title = _first_value(value, ("title", "name"))
+        url = _first_value(value, ("url", "link", "href"))
+        price = _json_price(value)
+        if title and (url or price is not None):
+            services.append(value)
+        for nested in value.values():
+            services.extend(_walk_json_services(nested))
+    elif isinstance(value, list):
+        for item in value:
+            services.extend(_walk_json_services(item))
+    return services
+
+
+def _item_from_json(
+    data: dict[str, object],
+    page_url: str,
+    category_name: str | None,
+) -> ScrapedItem | None:
+    title = _clean_title(_first_value(data, ("title", "name")))
+    if not title:
+        return None
+
+    raw_url = _first_value(data, ("url", "link", "href"))
+    service_url = _normalize_kwork_service_url(urljoin(page_url, raw_url)) if raw_url else None
+    price = _json_price(data)
+    if not service_url and price is None:
+        return None
+    if raw_url and not service_url:
+        return None
+
+    description = _first_value(data, ("description", "desc", "text", "shortDescription"))
+    return ScrapedItem(
+        source="kwork",
+        url=service_url or page_url,
+        title=title,
+        price=price,
+        currency="RUB" if price is not None else None,
+        description=_normalize_spaces(description) if description else None,
+        category=category_name or _category_name_from_url(page_url),
+        subcategory=_subcategory_name_from_url(page_url, category_name),
+        is_service=True,
+        parse_status="success",
+    )
+
+
+def _first_value(data: dict[str, object], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, (str, int, float)):
+            text = _normalize_spaces(str(value))
+            if text:
+                return text
+    return None
+
+
+def _json_price(data: dict[str, object]) -> Decimal | None:
+    for key in ("price", "amount", "minPrice", "min_price", "average_price"):
+        price = _parse_price(str(data.get(key))) if data.get(key) is not None else None
+        if price is not None:
+            return price
+    offers = data.get("offers")
+    if isinstance(offers, dict):
+        return _json_price(offers)
+    if isinstance(offers, list):
+        for offer in offers:
+            if isinstance(offer, dict):
+                price = _json_price(offer)
+                if price is not None:
+                    return price
+    return None
 
 
 def _parse_price(value: str | None) -> Decimal | None:
@@ -333,10 +625,7 @@ def _parse_price(value: str | None) -> Decimal | None:
 
 
 def _looks_like_price(value: str) -> bool:
-    return bool(
-        re.search(r"\d", value)
-        and re.search(r"(руб|₽|kwork|от)", value, re.IGNORECASE)
-    )
+    return bool(re.search(r"\d", value) and re.search(r"(руб|₽|kwork|от)", value, re.IGNORECASE))
 
 
 def _find_next_page_url(
@@ -346,9 +635,7 @@ def _find_next_page_url(
 ) -> str | None:
     current = _normalize_url(current_url)
     candidates: list[str] = []
-    for link in soup.select(KWORK_CARD_SELECTORS["pagination_next"]):
-        if not isinstance(link, Tag):
-            continue
+    for link in _safe_select(soup, KWORK_CARD_SELECTORS["pagination_next"]):
         href = link.get("href")
         if not href:
             continue
@@ -362,6 +649,46 @@ def _find_next_page_url(
         if next_url != current and next_url not in seen_pages:
             candidates.append(next_url)
     return candidates[0] if candidates else None
+
+
+def _normalize_kwork_service_url(url: str) -> str | None:
+    normalized = _normalize_url(url)
+    if not _is_kwork_service_url(normalized):
+        return None
+    parts = urlsplit(normalized)
+    return normalized if parts.scheme else f"https://kwork.ru{parts.path}"
+
+
+def _is_kwork_service_url(url: str) -> bool:
+    normalized = _normalize_url(url)
+    parts = urlsplit(normalized)
+    if parts.netloc and parts.netloc != "kwork.ru":
+        return False
+    if any(blocked in parts.path for blocked in BLOCKED_URL_PARTS):
+        return False
+    if parts.path.startswith("/categories/"):
+        return False
+    if KWORK_SERVICE_URL_RE.match(normalized):
+        return True
+    return bool(parts.netloc == "kwork.ru" and re.match(r"^/kwork/\d+", parts.path))
+
+
+def _is_valid_kwork_service(item: ScrapedItem) -> bool:
+    return bool(item.title and _normalize_kwork_service_url(item.url))
+
+
+def _dedupe_items(items: list[ScrapedItem]) -> list[ScrapedItem]:
+    result: list[ScrapedItem] = []
+    seen: set[str] = set()
+    for item in items:
+        url_key = _normalize_kwork_service_url(item.url) or ""
+        title_key = _normalize_spaces(item.title).casefold()
+        key = url_key or title_key
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
 
 
 def _normalize_url(url: str) -> str:
@@ -390,8 +717,45 @@ def _unique_keywords(values: list[str]) -> list[str]:
     return result
 
 
+def _keywords_from_text(text: str) -> list[str]:
+    return [word for word in re.findall(r"[A-Za-zА-Яа-яЁё0-9]{3,}", text)[:8]]
+
+
+def _clean_title(value: str | None) -> str | None:
+    if not value:
+        return None
+    title = _normalize_spaces(value)
+    if not (3 <= len(title) <= 180):
+        return None
+    blocked = {"следующая", "назад", "войти", "регистрация", "корзина", "каталог"}
+    if title.casefold() in blocked:
+        return None
+    return title
+
+
 def _normalize_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
+
+
+def _has_smart_captcha(html: str) -> bool:
+    return "isYandexSmartCaptcha" in html or "smartcaptcha.yandexcloud.net" in html
+
+
+def _empty_page_reason(html: str, soup: BeautifulSoup) -> str:
+    if _has_smart_captcha(html):
+        return KWORK_CAPTCHA_ERROR
+    if len(html.strip()) < 1000:
+        return "HTML Kwork подозрительно короткий, карточки услуг не найдены"
+    if _safe_select(soup, "a[href*='/categories/']"):
+        return "Страница категории Kwork открылась, но карточки услуг не найдены"
+    return "Карточки услуг Kwork не найдены: DOM, ссылки /kwork/ и JSON fallback не дали результатов"
+
+
+def _slug_from_url(url: str) -> str:
+    parts = urlsplit(url)
+    raw = (parts.path.strip("/") or parts.netloc or "kwork").replace("/", "_")
+    raw = re.sub(r"[^A-Za-zА-Яа-яЁё0-9_-]+", "_", raw).strip("_")
+    return (raw[:80] or "kwork").lower()
 
 
 def _failed_category(
@@ -403,6 +767,7 @@ def _failed_category(
 ) -> KworkCategory:
     return KworkCategory(
         category_name=category_name or _category_name_from_url(url),
+        subcategory_name=_subcategory_name_from_url(url, category_name),
         url=url,
         competitors_count=0,
         keywords=[],

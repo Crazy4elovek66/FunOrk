@@ -83,21 +83,21 @@ def test_kwork_category_parser_collects_metrics_with_pagination(monkeypatch):
         "https://kwork.ru/categories/design": """
             <html><h1>Дизайн</h1>
             <aside class="filters"><a>Логотипы</a></aside>
-            <article class="kwork-card">
-                <a href="/kwork/1">Логотип</a>
-                <span class="price">от 1 000 ₽</span>
+            <div data-id="1" class="js-kwork-card kwork-card-item">
+                <div class="kwork-card-item__title"><a href="/logo/1/logotip"><span class="first-letter">Логотип</span></a></div>
+                <div class="kwork-card-item__info-price"><span class="price-wrap__value">от 1 000 ₽</span></div>
                 <a class="tag">брендинг</a>
-            </article>
+            </div>
             <a rel="next" href="/categories/design?page=2">Следующая</a>
             </html>
         """,
         "https://kwork.ru/categories/design?page=2": """
             <html><h1>Дизайн</h1>
-            <article class="kwork-card">
-                <a href="/kwork/2">Баннер</a>
-                <span class="price">2 000 ₽</span>
+            <div data-id="2" class="js-kwork-card kwork-card-item">
+                <div class="kwork-card-item__title"><a href="/banner/2/banner"><span class="first-letter">Баннер</span></a></div>
+                <div class="kwork-card-item__info-price"><span class="price-wrap__value">2 000 ₽</span></div>
                 <a class="tag">баннеры</a>
-            </article>
+            </div>
             </html>
         """,
     }
@@ -124,7 +124,7 @@ def test_kwork_category_parser_collects_metrics_with_pagination(monkeypatch):
     assert category.average_price == Decimal("1500.00")
     assert len(items) == 2
     assert items[0].source == "kwork"
-    assert items[0].url == "https://kwork.ru/kwork/1"
+    assert items[0].url == "https://kwork.ru/logo/1/logotip"
     assert items[0].price == Decimal("1000")
     assert "брендинг" in category.keywords
     assert "Логотипы" in category.keywords
@@ -188,26 +188,26 @@ def test_kwork_catalog_bfs_returns_only_leaf_categories(monkeypatch):
         """,
         "https://kwork.ru/categories/logo": """
             <html><body>
-            <article class="kwork-card">
-                <a href="/kwork/1">Логотип</a>
-                <span class="price">1 000 ₽</span>
-            </article>
+            <div data-id="1" class="js-kwork-card kwork-card-item">
+                <div class="kwork-card-item__title"><a href="/logo/1/logotip"><span class="first-letter">Логотип</span></a></div>
+                <div class="kwork-card-item__info-price"><span class="price-wrap__value">1 000 ₽</span></div>
+            </div>
             </body></html>
         """,
         "https://kwork.ru/categories/banners": """
             <html><body>
-            <article class="kwork-card">
-                <a href="/kwork/2">Баннер</a>
-                <span class="price">2 000 ₽</span>
-            </article>
+            <div data-id="2" class="js-kwork-card kwork-card-item">
+                <div class="kwork-card-item__title"><a href="/banner/2/banner"><span class="first-letter">Баннер</span></a></div>
+                <div class="kwork-card-item__info-price"><span class="price-wrap__value">2 000 ₽</span></div>
+            </div>
             </body></html>
         """,
         "https://kwork.ru/categories/copywriting": """
             <html><body>
-            <article class="kwork-card">
-                <a href="/kwork/3">Текст</a>
-                <span class="price">3 000 ₽</span>
-            </article>
+            <div data-id="3" class="js-kwork-card kwork-card-item">
+                <div class="kwork-card-item__title"><a href="/text/3/text"><span class="first-letter">Текст</span></a></div>
+                <div class="kwork-card-item__info-price"><span class="price-wrap__value">3 000 ₽</span></div>
+            </div>
             </body></html>
         """,
     }
@@ -266,10 +266,7 @@ def test_kwork_category_marks_parse_failed_when_cards_are_missing(monkeypatch):
     assert items == []
     assert category.parse_status == "parse_failed"
     assert category.competitors_count == 0
-    assert category.parse_error == (
-        "Карточки не найдены. Возможно, изменилась верстка сайта или "
-        "требуется проверка браузера (капча)."
-    )
+    assert "карточки услуг не найдены" in category.parse_error.casefold()
 
 
 def test_kwork_category_keeps_parse_failed_without_cookie(monkeypatch):

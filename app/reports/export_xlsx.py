@@ -7,7 +7,13 @@ from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from app.config import config
-from app.reports.common import REPORT_COLUMNS, REPORT_LABELS, load_report_rows, report_filename
+from app.reports.common import (
+    REPORT_COLUMNS,
+    REPORT_LABELS,
+    export_kwork_services_csv,
+    load_report_rows,
+    report_filename,
+)
 
 
 def export_to_xlsx() -> Path:
@@ -25,6 +31,7 @@ def export_to_xlsx() -> Path:
         archive.writestr("xl/_rels/workbook.xml.rels", _workbook_rels_xml())
         archive.writestr("xl/worksheets/sheet1.xml", _sheet_xml(rows))
 
+    export_kwork_services_csv()
     return report_path
 
 

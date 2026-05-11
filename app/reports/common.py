@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import csv
+
+from app.config import config
 from app.db import get_connection
 
 REPORT_COLUMNS = (
@@ -67,6 +70,28 @@ HTML_BLOCKS = (
     ("Не брать", "не брать"),
 )
 
+KWORK_SERVICE_COLUMNS = (
+    "url",
+    "title",
+    "price",
+    "currency",
+    "category",
+    "subcategory",
+    "description",
+    "scraped_at",
+)
+
+KWORK_SERVICE_LABELS = {
+    "url": "Ссылка",
+    "title": "Услуга",
+    "price": "Цена",
+    "currency": "Валюта",
+    "category": "Категория",
+    "subcategory": "Подкатегория",
+    "description": "Описание",
+    "scraped_at": "Дата сбора",
+}
+
 
 def load_report_rows() -> list[dict[str, object]]:
     with get_connection() as connection:
@@ -124,3 +149,35 @@ def report_filename(extension: str) -> str:
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"report_{timestamp}.{extension}"
+
+
+def load_kwork_service_rows() -> list[dict[str, object]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT url, title, price, currency, category, subcategory, description, scraped_at
+            FROM scraped_items
+            WHERE source = 'kwork' AND parse_status = 'success'
+            ORDER BY scraped_at DESC, id DESC
+            """
+        ).fetchall()
+        return [{column: row[column] for column in KWORK_SERVICE_COLUMNS} for row in rows]
+
+
+def export_kwork_services_csv() -> None:
+    rows = load_kwork_service_rows()
+    if not rows:
+        return
+
+    from datetime import datetime
+
+    config.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = config.REPORTS_DIR / f"kwork_services_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    with path.open("w", encoding=config.REPORT_SETTINGS.encoding, newline="") as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=KWORK_SERVICE_COLUMNS,
+            delimiter=config.REPORT_SETTINGS.csv_delimiter,
+        )
+        writer.writerow({column: KWORK_SERVICE_LABELS[column] for column in KWORK_SERVICE_COLUMNS})
+        writer.writerows(rows)

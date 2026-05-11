@@ -19,6 +19,7 @@ def score_opportunity(
     risk_level: RiskLevel,
     risk_reason: str,
     mapping_data: dict[str, Any] | None,
+    demand_score: float | None = None,
 ) -> Opportunity:
     """Создает Opportunity с маржой, спросом, рисками и русским выводом."""
 
@@ -34,7 +35,11 @@ def score_opportunity(
         competitors_count=mapping.get("competitors_count"),
         requires_login_password=item.requires_login_password,
     )
-    demand_score = _score_demand(mapping.get("competitors_count"), scoring_rules)
+    demand_score = (
+        max(0, min(100, float(demand_score)))
+        if demand_score is not None
+        else _score_demand(mapping.get("competitors_count"), scoring_rules)
+    )
     opportunity_score = _weighted_score(
         margin_score=margin_score,
         risk_score=risk_score,
@@ -67,7 +72,7 @@ def score_opportunity(
         risk_weight=risk_score,
         opportunity_score=round(opportunity_score, 2),
         verdict=verdict,
-        recommendation=_recommendation_text(verdict),
+        recommendation=mapping.get("recommendation") or _recommendation_text(verdict),
         forbidden_words=list(mapping.get("forbidden_words") or []),
         safe_wording=mapping.get("safe_wording"),
         buyer_requirements=mapping.get("buyer_requirements"),

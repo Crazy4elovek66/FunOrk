@@ -20,6 +20,10 @@ class HttpClientError(RuntimeError):
 class AntiBanError(HttpClientError):
     """Сайт ограничил доступ или просит замедлить запросы."""
 
+    def __init__(self, message: str, *, html: str | None = None) -> None:
+        super().__init__(message)
+        self.html = html
+
 
 class PageNotFoundError(HttpClientError):
     """Страница не найдена."""
@@ -73,8 +77,9 @@ class HttpClient:
 
         if "isYandexSmartCaptcha" in response.text:
             raise AntiBanError(
-                "Kwork заблокировал доступ через Yandex SmartCaptcha. "
-                "Парсинг через requests невозможен."
+                "Kwork вернул SmartCaptcha (Yandex SmartCaptcha). Парсинг requests невозможен. "
+                "Добавьте актуальный KWORK_COOKIE или используйте ручной импорт.",
+                html=response.text,
             )
 
         cache_page(url, source=source, html=response.text, status_code=response.status_code)

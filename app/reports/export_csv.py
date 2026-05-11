@@ -6,7 +6,13 @@ import csv
 from pathlib import Path
 
 from app.config import config
-from app.reports.common import REPORT_COLUMNS, REPORT_LABELS, load_report_rows, report_filename
+from app.reports.common import (
+    REPORT_COLUMNS,
+    REPORT_LABELS,
+    export_kwork_services_csv,
+    load_report_rows,
+    report_filename,
+)
 
 
 def export_to_csv() -> Path:
@@ -22,4 +28,5 @@ def export_to_csv() -> Path:
         writer.writerow({column: REPORT_LABELS[column] for column in REPORT_COLUMNS})
         writer.writerows(load_report_rows())
 
+    export_kwork_services_csv()
     return report_path

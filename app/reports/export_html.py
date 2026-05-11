@@ -6,7 +6,15 @@ from html import escape
 from pathlib import Path
 
 from app.config import config
-from app.reports.common import HTML_BLOCKS, REPORT_LABELS, load_report_rows, report_filename
+from app.reports.common import (
+    HTML_BLOCKS,
+    KWORK_SERVICE_LABELS,
+    REPORT_LABELS,
+    export_kwork_services_csv,
+    load_kwork_service_rows,
+    load_report_rows,
+    report_filename,
+)
 
 
 def export_to_html() -> Path:
@@ -18,6 +26,7 @@ def export_to_html() -> Path:
     for title, verdict in HTML_BLOCKS:
         block_rows = [row for row in rows if row.get("verdict") == verdict]
         blocks.append(_render_block(title, block_rows))
+    blocks.append(_render_kwork_services(load_kwork_service_rows()))
 
     report_path.write_text(
         "\n".join(
@@ -48,6 +57,7 @@ def export_to_html() -> Path:
         ),
         encoding="utf-8",
     )
+    export_kwork_services_csv()
     return report_path
 
 
@@ -80,6 +90,30 @@ def _render_block(title: str, rows: list[dict[str, object]]) -> str:
             cells.append(f"<td>{value}</td>")
         rows_html.append("<tr>" + "".join(cells) + "</tr>")
 
+    return (
+        f"<section><h2>{escape(title)}</h2><table><thead><tr>{header_html}</tr></thead>"
+        f"<tbody>{''.join(rows_html)}</tbody></table></section>"
+    )
+
+
+def _render_kwork_services(rows: list[dict[str, object]]) -> str:
+    title = "Собранные услуги Kwork"
+    if not rows:
+        return f"<section><h2>{escape(title)}</h2><div class=\"empty\">Услуги Kwork пока не собраны.</div></section>"
+
+    headers = ("title", "price", "currency", "category", "subcategory", "description", "url", "scraped_at")
+    header_html = "".join(f"<th>{escape(KWORK_SERVICE_LABELS[key])}</th>" for key in headers)
+    rows_html = []
+    for row in rows:
+        cells = []
+        for key in headers:
+            value = "" if row.get(key) is None else str(row.get(key))
+            if key == "url" and value:
+                value = f'<a href="{escape(value)}">{escape(value)}</a>'
+            else:
+                value = escape(value)
+            cells.append(f"<td>{value}</td>")
+        rows_html.append("<tr>" + "".join(cells) + "</tr>")
     return (
         f"<section><h2>{escape(title)}</h2><table><thead><tr>{header_html}</tr></thead>"
         f"<tbody>{''.join(rows_html)}</tbody></table></section>"

@@ -55,6 +55,36 @@ def test_import_kwork_csv_and_db_schema(tmp_path, monkeypatch):
     assert rows[0]["competitors_count"] == 25
 
 
+def test_import_kwork_service_csv(tmp_path, monkeypatch):
+    db_path = tmp_path / "analyzer.sqlite"
+    monkeypatch.setattr("app.db.config.DATABASE_PATH", db_path)
+    init_db(db_path)
+
+    csv_path = tmp_path / "kwork_services.csv"
+    with csv_path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=["url", "title", "price", "currency", "description", "category", "subcategory"],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "url": "https://kwork.ru/kwork/1",
+                "title": "Помощь с Gemini",
+                "price": "1500",
+                "currency": "RUB",
+                "description": "Настройка промптов",
+                "category": "AI-услуги",
+                "subcategory": "Нейросети",
+            }
+        )
+
+    assert import_kwork_file(csv_path) == 1
+    rows = fetch_scraped_items(db_path, source="kwork")
+    assert rows[0]["title"] == "Помощь с Gemini"
+    assert rows[0]["is_service"] == 1
+
+
 def test_fetch_scraped_items_filters_source_and_limit(tmp_path):
     db_path = tmp_path / "analyzer.sqlite"
     init_db(db_path)

@@ -26,10 +26,16 @@ CATALOG_SELECTORS = {
 }
 
 KWORK_CARD_SELECTORS = {
-    "kwork_card": ".kwork-card, .kwork-card-item, .card, article, [data-kwork-id]",
-    "kwork_title": ".kwork-card-item__title, .title, h1, h2, a",
-    "kwork_url": "a[href]",
-    "kwork_price": ".price, .kwork-price, .kwork-card-item__price, [class*='price']",
+    "kwork_card": "div.js-kwork-card.kwork-card-item[data-id], div.kwork-card-item[data-id]",
+    "kwork_id": "div.js-kwork-card.kwork-card-item[data-id], div.kwork-card-item[data-id]",
+    "kwork_url": ".kwork-card-item__title a[href], .kwork-card-item__cover a[href]",
+    "kwork_title": ".kwork-card-item__title a span.first-letter, .kwork-card-item__title a",
+    "kwork_price": ".kwork-card-item__info-price .price-wrap__value, .kwork-card-item__info-price, .price-wrap__value",
+    "kwork_seller": ".kwork-card-item__username a",
+    "kwork_rating": ".kwork-card-item__rating-number",
+    "kwork_reviews": ".kwork-card-item__rating-count",
+    "kwork_seller_level": ".kwork-card-item__user-level",
+    "kwork_badges": ".cusongsblock__labels, .fox-express, .kwork-card-item__user-level",
     "kwork_keywords": ".tag, .tags a, [class*='tag'], [class*='keyword']",
     "filter_keywords": ".filter a, .filters a, .sidebar a, [class*='filter'] a",
     "pagination_next": "a[rel='next'], .pagination a.next, .paging a.next, a[href*='page=']",
