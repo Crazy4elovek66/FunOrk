@@ -1,0 +1,8 @@
+URL: https://kwork.ru/categories/business-copywriting
+Причина: найдена SmartCaptcha
+Длина HTML: 547129
+Ссылок /kwork/: 0
+script-тегов: 68
+price-like текстов: 21
+SmartCaptcha: да
+KWORK_COOKIE: задан

@@ -1,0 +1,8 @@
+URL: https://kwork.ru/categories/design
+Причина: HTML Kwork подозрительно короткий, карточки услуг не найдены
+Длина HTML: 47
+Ссылок /kwork/: 0
+script-тегов: 0
+price-like текстов: 0
+SmartCaptcha: нет
+KWORK_COOKIE: KWORK_COOKIE не задан

@@ -3,7 +3,7 @@ from decimal import Decimal
 from app.analyzers.kwork_mapper import map_to_kwork
 from app.analyzers.opportunity_scorer import score_opportunity
 from app.analyzers.risk_classifier import analyze_risk
-from app.collectors.funpay import parse_category
+from app.collectors.funpay import collect_catalog_entries, collect_catalog_id_groups, parse_category
 from app.collectors.kwork import _collect_catalog_urls, _collect_sitemap_urls, parse_kwork_category
 from app.models import ScrapedItem
 
@@ -164,8 +164,95 @@ def test_funpay_category_parser_collects_features_with_pagination(monkeypatch):
     assert items[0].is_subscription is True
     assert items[0].can_be_done_by_id is True
     assert items[0].requires_login_password is False
-    assert items[0].category == "потребуется только ID профиля"
+    assert items[0].category == "FunPay"
+    assert items[0].category_id == "1"
     assert items[1].is_service is True
+
+
+def test_funpay_parser_uses_catalog_category_name_when_provided(monkeypatch):
+    def fake_get_html(self, url, *, source="funpay", force=False):
+        return """
+            <html><body>
+            <a class="tc-item" href="/lots/offer?id=1">
+                <div class="tc-desc-text">Premium подписка по ID без пароля</div>
+                <div class="tc-server">потребуется только ID профиля</div>
+                <div class="tc-price">100 ₽</div>
+            </a>
+            </body></html>
+        """
+
+    monkeypatch.setattr("app.collectors.funpay.HttpClient.get_html", fake_get_html)
+
+    items = parse_category("https://funpay.com/lots/1/", category_name="ChatGPT")
+
+    assert items[0].category == "ChatGPT"
+    assert items[0].category_id == "1"
+
+
+def test_funpay_catalog_collects_main_category_names_and_ids(monkeypatch):
+    def fake_get_html(self, url, *, source="funpay", force=False):
+        return """
+            <html><body>
+            <div class="game-title" data-id="754">
+                <a href="/lots/3486/">Abyss of Dungeons</a>
+            </div>
+            <div class="game-categories">
+                <a href="/lots/3487/">Донат</a>
+                <a href="/lots/3488/">Прочее</a>
+            </div>
+            <div class="game-title" data-id="155">
+                <a href="/lots/706/">ChatGPT</a>
+            </div>
+            </body></html>
+        """
+
+    monkeypatch.setattr("app.collectors.funpay.HttpClient.get_html", fake_get_html)
+
+    entries = collect_catalog_entries(force=True, limit=10)
+
+    assert [entry.name for entry in entries] == ["Abyss of Dungeons", "ChatGPT"]
+    assert [entry.category_id for entry in entries] == ["3486", "706"]
+    assert entries[0].group_id == "754"
+
+
+def test_funpay_catalog_id_groups_include_nested_lot_ids(monkeypatch):
+    def fake_get_html(self, url, *, source="funpay", force=False):
+        return """
+            <html><body>
+            <div class="game-title" data-id="754">
+                <a href="/lots/3486/">Abyss of Dungeons</a>
+            </div>
+            <div class="game-categories">
+                <a href="/lots/3487/">Донат</a>
+                <a href="/lots/3490/">Прочее</a>
+            </div>
+            <div class="game-title" data-id="941">
+                <a href="/lots/2725/">Age of Mythology: Retold</a>
+            </div>
+            <div class="game-categories">
+                <a href="/lots/2726/">Аккаунты</a>
+                <a href="/lots/2727/">Ключи</a>
+                <a href="/lots/2728/">Оффлайн активации</a>
+                <a href="/lots/2729/">Game Pass</a>
+                <a href="/lots/2730/">Прочее</a>
+            </div>
+            </body></html>
+        """
+
+    monkeypatch.setattr("app.collectors.funpay.HttpClient.get_html", fake_get_html)
+
+    groups = collect_catalog_id_groups(force=True, limit=10)
+    groups_by_name = {group.name: group for group in groups}
+
+    assert groups_by_name["Abyss of Dungeons"].category_ids == ("3486", "3487", "3490")
+    assert groups_by_name["Age of Mythology: Retold"].category_ids == (
+        "2725",
+        "2726",
+        "2727",
+        "2728",
+        "2729",
+        "2730",
+    )
 
 
 def test_funpay_parser_splits_lot_title_and_subcategory(monkeypatch):
@@ -186,7 +273,8 @@ def test_funpay_parser_splits_lot_title_and_subcategory(monkeypatch):
 
     assert items[0].title == "VK комментарии живыми людьми"
     assert items[0].subcategory == "Комментарии"
-    assert items[0].category == "VK"
+    assert items[0].category == "FunPay"
+    assert items[0].category_id == "706"
 
 
 def test_funpay_parser_marks_account_slang_as_red(monkeypatch):

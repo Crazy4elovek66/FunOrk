@@ -1,0 +1,8 @@
+URL: https://kwork.ru/categories/graphic-design
+Причина: найдена SmartCaptcha
+Длина HTML: 816004
+Ссылок /kwork/: 0
+script-тегов: 68
+price-like текстов: 17
+SmartCaptcha: да
+KWORK_COOKIE: задан

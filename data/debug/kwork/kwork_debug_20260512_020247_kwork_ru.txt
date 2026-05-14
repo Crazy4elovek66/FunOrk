@@ -1,0 +1,8 @@
+URL: https://kwork.ru
+Причина: pre-flight: Kwork вернул SmartCaptcha
+Длина HTML: 73633
+Ссылок /kwork/: 0
+script-тегов: 51
+price-like текстов: 6
+SmartCaptcha: да
+KWORK_COOKIE: задан

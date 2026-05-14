@@ -1,0 +1,8 @@
+URL: https://kwork.ru/categories/videogeneration
+Причина: найдена SmartCaptcha
+Длина HTML: 807718
+Ссылок /kwork/: 0
+script-тегов: 68
+price-like текстов: 5
+SmartCaptcha: да
+KWORK_COOKIE: задан

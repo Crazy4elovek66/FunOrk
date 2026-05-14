@@ -1,0 +1,8 @@
+URL: https://kwork.ru/categories/email-marketing
+Причина: найдена SmartCaptcha
+Длина HTML: 193269
+Ссылок /kwork/: 0
+script-тегов: 68
+price-like текстов: 19
+SmartCaptcha: да
+KWORK_COOKIE: задан

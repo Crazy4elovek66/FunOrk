@@ -1,0 +1,8 @@
+URL: https://kwork.ru/categories/promotion
+Причина: найдена SmartCaptcha
+Длина HTML: 121129
+Ссылок /kwork/: 0
+script-тегов: 58
+price-like текстов: 2
+SmartCaptcha: да
+KWORK_COOKIE: задан

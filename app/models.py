@@ -10,6 +10,8 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 
 
 RiskLevel = Literal["GREEN", "YELLOW", "RED"]
+OpportunityStatus = Literal["new", "interesting", "in_progress", "rejected", "kwork_created"]
+ComplianceStatus = Literal["ready", "needs_manual_review", "blocked"]
 ParseStatus = Literal[
     "pending",
     "success",
@@ -37,6 +39,7 @@ class ScrapedItem(BaseModel):
     currency: str | None = None
     description: str | None = None
     category: str | None = None
+    category_id: str | None = None
     subcategory: str | None = None
     requires_login_password: bool = False
     can_be_done_by_id: bool = False
@@ -144,12 +147,33 @@ class Opportunity(BaseModel):
     risk_weight: float = Field(default=0, ge=0, le=100)
     opportunity_score: float = Field(default=0, ge=0, le=100)
     verdict: str
+    processing_status: OpportunityStatus = "new"
     recommendation: str | None = None
     forbidden_words: list[str] = Field(default_factory=list)
     safe_wording: str | None = None
     buyer_requirements: str | None = None
     forbidden_buyer_requests: str | None = None
     report_format: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class AdaptedKworkCard(BaseModel):
+    model_config = ConfigDict(validate_assignment=True)
+
+    id: int | None = None
+    opportunity_id: int
+    title: str = Field(..., min_length=1)
+    kwork_category: str = Field(..., min_length=1)
+    image_prompt: str = Field(..., min_length=1)
+    description: str = Field(..., min_length=1)
+    buyer_requirements: str = Field(..., min_length=1)
+    base_price: Decimal | None = Field(default=None, ge=0)
+    extra_options: list[str] = Field(default_factory=list)
+    faq: list[dict[str, str]] = Field(default_factory=list)
+    risk_warnings: str = Field(..., min_length=1)
+    source_funpay_url: str = Field(..., min_length=1)
+    compliance_status: ComplianceStatus = "ready"
+    compliance_markers: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
 
 

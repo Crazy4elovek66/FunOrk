@@ -1,0 +1,8 @@
+URL: https://kwork.ru/categories/programming
+Причина: найдена SmartCaptcha
+Длина HTML: 135438
+Ссылок /kwork/: 0
+script-тегов: 58
+price-like текстов: 2
+SmartCaptcha: да
+KWORK_COOKIE: задан

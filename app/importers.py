@@ -25,6 +25,7 @@ def import_funpay_file(path: Path | str) -> int:
             currency=clean_text(row.get("currency")) or "RUB",
             description=clean_text(row.get("description")),
             category=clean_text(row.get("category")),
+            category_id=clean_text(row.get("category_id") or row.get("id")),
             subcategory=clean_text(row.get("subcategory")),
             parse_status="success",
         )

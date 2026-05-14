@@ -8,6 +8,7 @@ from collections import deque
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from xml.etree import ElementTree
 
@@ -33,6 +34,7 @@ KWORK_SERVICE_URL_RE = re.compile(
     r"^(?:https?://kwork\.ru)?/[^/?#]+/\d+/[^/?#]+",
     re.IGNORECASE,
 )
+ProgressCallback = Callable[[int, int, str], None]
 
 
 class SessionValidationError(RuntimeError):
@@ -83,20 +85,48 @@ def collect_catalog(
     *,
     force: bool = False,
     limit: int = 100,
+    progress_callback: ProgressCallback | None = None,
 ) -> tuple[list[KworkCategory], list[ScrapedItem]]:
+    _report_progress(progress_callback, 1, 100, "Проверяю сессию Kwork...")
     if not verify_kwork_session(force=True):
         raise SessionValidationError(KWORK_SESSION_ERROR)
 
+    _report_progress(progress_callback, 5, 100, "Собираю список категорий Kwork...")
     urls = _collect_sitemap_urls(force=force, limit=limit)
     if not urls:
         urls = _collect_catalog_urls(force=force, limit=limit)
 
     categories: list[KworkCategory] = []
     items: list[ScrapedItem] = []
-    for url in urls[:limit]:
-        category, category_items = parse_kwork_category(url, force=force)
+    selected_urls = urls[:limit]
+    total_urls = max(1, len(selected_urls))
+    pages_per_category = max(1, config.KWORK_MAX_PAGES_PER_CATEGORY)
+    total_pages = total_urls * pages_per_category
+    for index, url in enumerate(selected_urls, start=1):
+        _report_progress(
+            progress_callback,
+            index,
+            total_urls,
+            f"Обрабатываю категорию Kwork {index}/{total_urls}: {url}",
+        )
+        category, category_items = parse_kwork_category(
+            url,
+            force=force,
+            progress_callback=lambda page, pages, message, category_index=index: _report_progress(
+                progress_callback,
+                ((category_index - 1) * pages_per_category) + page,
+                total_pages,
+                message,
+            ),
+        )
         categories.append(category)
         items.extend(category_items)
+        _report_progress(
+            progress_callback,
+            index,
+            total_urls,
+            f"Собрано услуг Kwork: {len(items)}. Завершена категория {index}/{total_urls}.",
+        )
     return categories, items
 
 
@@ -105,6 +135,7 @@ def parse_kwork_category(
     *,
     force: bool = False,
     max_pages: int | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> tuple[KworkCategory, list[ScrapedItem]]:
     """Загружает листинг Kwork и извлекает реальные карточки услуг."""
 
@@ -120,11 +151,17 @@ def parse_kwork_category(
     last_reason = "услуги Kwork не найдены"
 
     try:
-        for _ in range(pages_limit):
+        for page_number in range(1, pages_limit + 1):
             normalized_page_url = _normalize_url(current_url)
             if normalized_page_url in seen_pages:
                 break
             seen_pages.add(normalized_page_url)
+            _report_progress(
+                progress_callback,
+                page_number,
+                pages_limit,
+                f"Читаю страницу Kwork {page_number}/{pages_limit}: {current_url}",
+            )
 
             html = client.get_html(current_url, source="kwork", force=force)
             last_html = html
@@ -196,6 +233,16 @@ def parse_kwork_category(
         ),
         items,
     )
+
+
+def _report_progress(
+    progress_callback: ProgressCallback | None,
+    current: int,
+    total: int,
+    message: str,
+) -> None:
+    if progress_callback is not None:
+        progress_callback(current, total, message)
 
 
 def extract_kwork_services_from_dom(

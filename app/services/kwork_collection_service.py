@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from app.collectors.kwork import collect_catalog as collect_kwork_catalog
 from app.config import config
@@ -16,8 +17,13 @@ from app.db import (
 )
 from app.models import KworkCategory, ParseError, RunHistory, ScrapedItem
 
+ProgressCallback = Callable[[int, int, str], None]
 
-def collect_kwork_with_summary(force: bool = False) -> dict[str, object]:
+
+def collect_kwork_with_summary(
+    force: bool = False,
+    progress_callback: ProgressCallback | None = None,
+) -> dict[str, object]:
     """Собирает категории и услуги Kwork, сохраняет их и возвращает summary."""
 
     init_db()
@@ -27,8 +33,10 @@ def collect_kwork_with_summary(force: bool = False) -> dict[str, object]:
         categories, items = collect_kwork_catalog(
             force=force,
             limit=config.KWORK_MAX_CATEGORIES,
+            progress_callback=progress_callback,
         )
         processed = len(categories)
+        _report_progress(progress_callback, 95, 100, "Сохраняю категории и услуги Kwork в базу...")
         summary = save_kwork_collection_summary(categories, items)
         save_run_history(
             RunHistory(
@@ -50,6 +58,16 @@ def collect_kwork_with_summary(force: bool = False) -> dict[str, object]:
             )
         )
         raise
+
+
+def _report_progress(
+    progress_callback: ProgressCallback | None,
+    current: int,
+    total: int,
+    message: str,
+) -> None:
+    if progress_callback is not None:
+        progress_callback(current, total, message)
 
 
 def save_kwork_collection_summary(

@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator, TypeVar, TypedDict
 
 from app.config import config
 from app.models import (
+    AdaptedKworkCard,
     AnalysisResult,
     FunPayCategory,
     KworkCategory,
@@ -19,8 +21,22 @@ from app.models import (
     RunHistory,
     ScrapedItem,
 )
+from app.filters.funpay_games import (
+    classify_game_category_reasons,
+    classify_game_item_reasons,
+    is_game_related_category,
+    is_game_related_item,
+)
 
 SCRAPED_ITEMS_UNIQUE_COLUMNS = ("source", "url")
+SQLITE_DELETE_BATCH_SIZE = 500
+ProgressCallback = Callable[[int, int, str], None]
+T = TypeVar("T")
+
+
+class CleanReport(TypedDict):
+    deleted: int
+    reasons: dict[str, int]
 
 
 def _connect(db_path: Path | None = None) -> sqlite3.Connection:
@@ -70,6 +86,7 @@ def init_db(db_path: Path | None = None) -> None:
                 currency TEXT,
                 description TEXT,
                 category TEXT,
+                category_id TEXT,
                 subcategory TEXT,
                 requires_login_password INTEGER NOT NULL DEFAULT 0,
                 can_be_done_by_id INTEGER NOT NULL DEFAULT 0,
@@ -84,6 +101,7 @@ def init_db(db_path: Path | None = None) -> None:
             """
         )
         _ensure_column(connection, "scraped_items", "requires_login_password", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "scraped_items", "category_id", "TEXT")
         _ensure_column(connection, "scraped_items", "can_be_done_by_id", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(connection, "scraped_items", "is_code_or_key", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(connection, "scraped_items", "is_subscription", "INTEGER NOT NULL DEFAULT 0")
@@ -130,6 +148,7 @@ def init_db(db_path: Path | None = None) -> None:
                 risk_weight REAL NOT NULL DEFAULT 0,
                 opportunity_score REAL NOT NULL DEFAULT 0,
                 verdict TEXT NOT NULL,
+                processing_status TEXT NOT NULL DEFAULT 'new',
                 recommendation TEXT,
                 forbidden_words TEXT NOT NULL DEFAULT '[]',
                 safe_wording TEXT,
@@ -142,7 +161,31 @@ def init_db(db_path: Path | None = None) -> None:
             """
         )
         _ensure_column(connection, "opportunities", "forbidden_buyer_requests", "TEXT")
+        _ensure_column(connection, "opportunities", "processing_status", "TEXT NOT NULL DEFAULT 'new'")
         _ensure_opportunities_unique_index(connection)
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS adapted_kwork_cards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                opportunity_id INTEGER NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                kwork_category TEXT NOT NULL,
+                image_prompt TEXT NOT NULL,
+                description TEXT NOT NULL,
+                buyer_requirements TEXT NOT NULL,
+                base_price TEXT,
+                extra_options TEXT NOT NULL DEFAULT '[]',
+                faq TEXT NOT NULL DEFAULT '[]',
+                risk_warnings TEXT NOT NULL,
+                source_funpay_url TEXT NOT NULL,
+                compliance_status TEXT NOT NULL,
+                compliance_markers TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
+            )
+            """
+        )
 
         connection.execute(
             """
@@ -310,17 +353,18 @@ def save_scraped_item(item: ScrapedItem, db_path: Path | None = None) -> int:
             """
             INSERT INTO scraped_items (
                 source, url, title, price, currency, description, category,
-                subcategory, requires_login_password, can_be_done_by_id,
+                category_id, subcategory, requires_login_password, can_be_done_by_id,
                 is_code_or_key, is_subscription, is_service, parse_status,
                 parse_error, scraped_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source, url) DO UPDATE SET
                 title = excluded.title,
                 price = excluded.price,
                 currency = excluded.currency,
                 description = excluded.description,
                 category = excluded.category,
+                category_id = excluded.category_id,
                 subcategory = excluded.subcategory,
                 requires_login_password = excluded.requires_login_password,
                 can_be_done_by_id = excluded.can_be_done_by_id,
@@ -339,6 +383,7 @@ def save_scraped_item(item: ScrapedItem, db_path: Path | None = None) -> int:
                 item.currency,
                 item.description,
                 item.category,
+                item.category_id,
                 item.subcategory,
                 int(item.requires_login_password),
                 int(item.can_be_done_by_id),
@@ -404,10 +449,10 @@ def save_opportunity(opportunity: Opportunity, db_path: Path | None = None) -> i
                 normalized_type, possible_kwork_service_title, possible_kwork_category,
                 buy_price, sell_price, estimated_margin_percent, risk_level, risk_reason,
                 moderation_risk, dispute_risk, demand_weight, margin_weight, risk_weight,
-                opportunity_score, verdict, recommendation, forbidden_words, safe_wording,
+                opportunity_score, verdict, processing_status, recommendation, forbidden_words, safe_wording,
                 buyer_requirements, forbidden_buyer_requests, report_format, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source_url) DO UPDATE SET
                 funpay_category_id = excluded.funpay_category_id,
                 source_category = excluded.source_category,
@@ -427,6 +472,7 @@ def save_opportunity(opportunity: Opportunity, db_path: Path | None = None) -> i
                 risk_weight = excluded.risk_weight,
                 opportunity_score = excluded.opportunity_score,
                 verdict = excluded.verdict,
+                processing_status = COALESCE(opportunities.processing_status, excluded.processing_status),
                 recommendation = excluded.recommendation,
                 forbidden_words = excluded.forbidden_words,
                 safe_wording = excluded.safe_wording,
@@ -455,6 +501,7 @@ def save_opportunity(opportunity: Opportunity, db_path: Path | None = None) -> i
                 opportunity.risk_weight,
                 opportunity.opportunity_score,
                 opportunity.verdict,
+                opportunity.processing_status,
                 opportunity.recommendation,
                 json.dumps(opportunity.forbidden_words, ensure_ascii=False),
                 opportunity.safe_wording,
@@ -471,6 +518,94 @@ def save_opportunity(opportunity: Opportunity, db_path: Path | None = None) -> i
         if row is None:
             raise RuntimeError(f"Не удалось сохранить opportunity: {opportunity.source_url}")
         return int(row["id"])
+
+
+def save_adapted_kwork_card(card: AdaptedKworkCard, db_path: Path | None = None) -> int:
+    with get_connection(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO adapted_kwork_cards (
+                opportunity_id, title, kwork_category, image_prompt, description,
+                buyer_requirements, base_price, extra_options, faq, risk_warnings,
+                source_funpay_url, compliance_status, compliance_markers, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(opportunity_id) DO UPDATE SET
+                title = excluded.title,
+                kwork_category = excluded.kwork_category,
+                image_prompt = excluded.image_prompt,
+                description = excluded.description,
+                buyer_requirements = excluded.buyer_requirements,
+                base_price = excluded.base_price,
+                extra_options = excluded.extra_options,
+                faq = excluded.faq,
+                risk_warnings = excluded.risk_warnings,
+                source_funpay_url = excluded.source_funpay_url,
+                compliance_status = excluded.compliance_status,
+                compliance_markers = excluded.compliance_markers,
+                created_at = excluded.created_at
+            """,
+            (
+                card.opportunity_id,
+                card.title,
+                card.kwork_category,
+                card.image_prompt,
+                card.description,
+                card.buyer_requirements,
+                str(card.base_price) if card.base_price is not None else None,
+                json.dumps(card.extra_options, ensure_ascii=False),
+                json.dumps(card.faq, ensure_ascii=False),
+                card.risk_warnings,
+                card.source_funpay_url,
+                card.compliance_status,
+                json.dumps(card.compliance_markers, ensure_ascii=False),
+                card.created_at.isoformat(),
+            ),
+        )
+        row = connection.execute(
+            "SELECT id FROM adapted_kwork_cards WHERE opportunity_id = ?",
+            (card.opportunity_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(f"Не удалось сохранить адаптированную карточку: {card.opportunity_id}")
+        return int(row["id"])
+
+
+def fetch_adapted_kwork_card(
+    opportunity_id: int,
+    db_path: Path | None = None,
+) -> sqlite3.Row | None:
+    with get_connection(db_path) as connection:
+        return connection.execute(
+            """
+            SELECT *
+            FROM adapted_kwork_cards
+            WHERE opportunity_id = ?
+            """,
+            (opportunity_id,),
+        ).fetchone()
+
+
+def update_opportunity_status(
+    opportunity_id: int,
+    processing_status: str,
+    db_path: Path | None = None,
+) -> None:
+    allowed = {"new", "interesting", "in_progress", "rejected", "kwork_created"}
+    if processing_status not in allowed:
+        raise ValueError(f"Неизвестный статус обработки: {processing_status}")
+
+    with get_connection(db_path) as connection:
+        cursor = connection.execute(
+            """
+            UPDATE opportunities
+            SET processing_status = ?
+            WHERE id = ?
+            """,
+            (processing_status, opportunity_id),
+        )
+        if cursor.rowcount == 0:
+            raise ValueError(f"Opportunity не найден: {opportunity_id}")
 
 
 def save_funpay_category(category: FunPayCategory, db_path: Path | None = None) -> int:
@@ -673,6 +808,320 @@ def fetch_scraped_items(
 
     with get_connection(db_path) as connection:
         return list(connection.execute(query, tuple(params)).fetchall())
+
+
+def clean_funpay_table_by_current_filters(
+    db_path: Path | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> CleanReport:
+    with get_connection(db_path) as connection:
+        rows = connection.execute(
+            "SELECT * FROM scraped_items WHERE source = 'funpay'"
+        ).fetchall()
+        total_rows = max(1, len(rows))
+        urls_to_delete: list[str] = []
+        ids_to_delete: list[int] = []
+        reason_counts: dict[str, int] = {}
+        for index, row in enumerate(rows, start=1):
+            item = _scraped_item_from_row(row)
+            item_filter_url = _funpay_filter_url(row, item.url)
+            reasons = classify_game_item_reasons(item)
+            if not reasons and item_filter_url != item.url:
+                reasons = classify_game_category_reasons(
+                    name=item.category,
+                    text=" ".join(filter(None, (item.title, item.description, item.category, item.subcategory))),
+                    url=item_filter_url,
+                )
+            if reasons:
+                ids_to_delete.append(int(row["id"]))
+                urls_to_delete.append(str(row["url"]))
+                _add_reasons(reason_counts, reasons)
+            _report_clean_progress(
+                progress_callback,
+                index,
+                total_rows,
+                f"Проверяю лоты FunPay {index}/{total_rows}. К удалению: {len(ids_to_delete)}.",
+            )
+
+        category_rows = connection.execute("SELECT * FROM funpay_categories").fetchall()
+        category_urls_to_delete: list[str] = []
+        for row in category_rows:
+            reasons = classify_game_category_reasons(
+                name=row["category_name"],
+                text=" ".join(
+                    filter(
+                        None,
+                        (
+                            row["category_name"],
+                            row["subcategory_name"],
+                            row["raw_type"],
+                            row["normalized_type"],
+                            row["delivery_method"],
+                        ),
+                    )
+                ),
+                url=row["url"],
+            )
+            if reasons:
+                category_urls_to_delete.append(str(row["url"]))
+                _add_reasons(reason_counts, reasons)
+
+        _report_clean_progress(
+            progress_callback,
+            total_rows,
+            total_rows,
+            "Удаляю строки FunPay, которые не прошли актуальные фильтры...",
+        )
+        _delete_by_ids(connection, "scraped_items", ids_to_delete)
+        _delete_by_urls(connection, "funpay_categories", category_urls_to_delete)
+        _delete_by_source_urls(connection, "opportunities", urls_to_delete)
+        return {"deleted": len(ids_to_delete), "reasons": reason_counts}
+
+
+def clean_kwork_table_by_current_filters(
+    db_path: Path | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> CleanReport:
+    with get_connection(db_path) as connection:
+        rows = connection.execute(
+            "SELECT * FROM scraped_items WHERE source = 'kwork'"
+        ).fetchall()
+        total_rows = max(1, len(rows))
+        ids_to_delete: list[int] = []
+        for index, row in enumerate(rows, start=1):
+            if not _is_valid_saved_kwork_row(row):
+                ids_to_delete.append(int(row["id"]))
+            _report_clean_progress(
+                progress_callback,
+                index,
+                total_rows,
+                f"Проверяю услуги Kwork {index}/{total_rows}. К удалению: {len(ids_to_delete)}.",
+            )
+        _delete_by_ids(connection, "scraped_items", ids_to_delete)
+        reasons = {"некорректная запись Kwork": len(ids_to_delete)} if ids_to_delete else {}
+        return {"deleted": len(ids_to_delete), "reasons": reasons}
+
+
+def clean_opportunities_table_by_current_filters(
+    db_path: Path | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> CleanReport:
+    with get_connection(db_path) as connection:
+        funpay_urls = {
+            str(row["url"])
+            for row in connection.execute(
+                "SELECT url FROM scraped_items WHERE source = 'funpay'"
+            ).fetchall()
+        }
+        rows = connection.execute("SELECT * FROM opportunities").fetchall()
+        total_rows = max(1, len(rows))
+        ids_to_delete: list[int] = []
+        reason_counts: dict[str, int] = {}
+        for index, row in enumerate(rows, start=1):
+            reasons = _opportunity_filter_reasons(row, funpay_urls)
+            if reasons:
+                ids_to_delete.append(int(row["id"]))
+                _add_reasons(reason_counts, reasons)
+            _report_clean_progress(
+                progress_callback,
+                index,
+                total_rows,
+                f"Проверяю выводы {index}/{total_rows}. К удалению: {len(ids_to_delete)}.",
+            )
+        _delete_by_ids(connection, "opportunities", ids_to_delete)
+        return {"deleted": len(ids_to_delete), "reasons": reason_counts}
+
+
+def clear_funpay_work_table(db_path: Path | None = None) -> dict[str, int]:
+    with get_connection(db_path) as connection:
+        funpay_items = connection.execute(
+            "DELETE FROM scraped_items WHERE source = 'funpay'"
+        ).rowcount
+        funpay_categories = connection.execute("DELETE FROM funpay_categories").rowcount
+        opportunities = connection.execute("DELETE FROM opportunities").rowcount
+        analysis_results = connection.execute("DELETE FROM analysis_results").rowcount
+        adapted_cards = connection.execute("DELETE FROM adapted_kwork_cards").rowcount
+    return {
+        "FunPay лоты": int(funpay_items),
+        "FunPay категории": int(funpay_categories),
+        "Связанные выводы": int(opportunities),
+        "Связанные карточки": int(adapted_cards),
+        "Результаты анализа": int(analysis_results),
+    }
+
+
+def clear_kwork_work_table(db_path: Path | None = None) -> dict[str, int]:
+    with get_connection(db_path) as connection:
+        kwork_items = connection.execute(
+            "DELETE FROM scraped_items WHERE source = 'kwork'"
+        ).rowcount
+        kwork_categories = connection.execute("DELETE FROM kwork_categories").rowcount
+    return {
+        "Kwork услуги": int(kwork_items),
+        "Kwork категории": int(kwork_categories),
+    }
+
+
+def clear_opportunities_work_table(db_path: Path | None = None) -> dict[str, int]:
+    with get_connection(db_path) as connection:
+        adapted_cards = connection.execute("DELETE FROM adapted_kwork_cards").rowcount
+        opportunities = connection.execute("DELETE FROM opportunities").rowcount
+        analysis_results = connection.execute("DELETE FROM analysis_results").rowcount
+    return {
+        "Выводы сравнения": int(opportunities),
+        "Адаптированные карточки": int(adapted_cards),
+        "Результаты анализа": int(analysis_results),
+    }
+
+
+def _add_reasons(reason_counts: dict[str, int], reasons: list[str]) -> None:
+    for reason in reasons:
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+
+
+def _funpay_filter_url(row: sqlite3.Row, fallback_url: str) -> str:
+    keys = row.keys()
+    category_id = str(row["category_id"] or "").strip() if "category_id" in keys else ""
+    if not category_id:
+        category_id = _extract_legacy_funpay_category_id(row)
+    if not category_id:
+        return fallback_url
+    return f"https://funpay.com/lots/{category_id}/"
+
+
+def _extract_legacy_funpay_category_id(row: sqlite3.Row) -> str:
+    values = []
+    for column in ("category", "subcategory"):
+        try:
+            values.append(str(row[column] or ""))
+        except (IndexError, KeyError):
+            continue
+    for value in values:
+        normalized = value.strip()
+        if normalized.isdigit():
+            return normalized
+        match = re.fullmatch(r"FunPay\s+(\d+)", normalized, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _report_clean_progress(
+    progress_callback: ProgressCallback | None,
+    current: int,
+    total: int,
+    message: str,
+) -> None:
+    if progress_callback is not None and (current == total or current % 250 == 0 or current == 1):
+        progress_callback(current, total, message)
+
+
+def _scraped_item_from_row(row: sqlite3.Row) -> ScrapedItem:
+    return ScrapedItem(
+        id=row["id"],
+        source=row["source"],
+        url=row["url"],
+        title=row["title"],
+        price=row["price"],
+        currency=row["currency"],
+        description=row["description"],
+        category=row["category"],
+        category_id=row["category_id"] if "category_id" in row.keys() else None,
+        subcategory=row["subcategory"],
+        requires_login_password=bool(row["requires_login_password"]),
+        can_be_done_by_id=bool(row["can_be_done_by_id"]),
+        is_code_or_key=bool(row["is_code_or_key"]),
+        is_subscription=bool(row["is_subscription"]),
+        is_service=bool(row["is_service"]),
+        parse_status=row["parse_status"],
+        parse_error=row["parse_error"],
+        scraped_at=datetime.fromisoformat(row["scraped_at"]),
+    )
+
+
+def _is_valid_saved_kwork_row(row: sqlite3.Row) -> bool:
+    return bool(
+        row["source"] == "kwork"
+        and row["parse_status"] == "success"
+        and row["title"]
+        and str(row["url"]).startswith(("http://", "https://"))
+    )
+
+
+def _opportunity_fails_current_filters(
+    row: sqlite3.Row,
+    valid_funpay_urls: set[str],
+) -> bool:
+    return bool(_opportunity_filter_reasons(row, valid_funpay_urls))
+
+
+def _opportunity_filter_reasons(
+    row: sqlite3.Row,
+    valid_funpay_urls: set[str],
+) -> list[str]:
+    source_url = str(row["source_url"])
+    if source_url not in valid_funpay_urls:
+        return ["исходный FunPay-лот удален фильтрами"]
+    return classify_game_category_reasons(
+        name=row["source_category"],
+        text=" ".join(
+            filter(
+                None,
+                (
+                    row["source_category"],
+                    row["source_subcategory"],
+                    row["possible_kwork_service_title"],
+                    row["risk_reason"],
+                    row["safe_wording"],
+                ),
+            )
+        ),
+        url=source_url,
+    )
+
+
+def _delete_by_ids(
+    connection: sqlite3.Connection,
+    table_name: str,
+    ids: list[int],
+) -> None:
+    for chunk in _chunks(ids, SQLITE_DELETE_BATCH_SIZE):
+        placeholders = ",".join("?" for _ in chunk)
+        connection.execute(
+            f"DELETE FROM {table_name} WHERE id IN ({placeholders})",
+            chunk,
+        )
+
+
+def _delete_by_urls(
+    connection: sqlite3.Connection,
+    table_name: str,
+    urls: list[str],
+) -> None:
+    for chunk in _chunks(urls, SQLITE_DELETE_BATCH_SIZE):
+        placeholders = ",".join("?" for _ in chunk)
+        connection.execute(
+            f"DELETE FROM {table_name} WHERE url IN ({placeholders})",
+            chunk,
+        )
+
+
+def _delete_by_source_urls(
+    connection: sqlite3.Connection,
+    table_name: str,
+    urls: list[str],
+) -> None:
+    for chunk in _chunks(urls, SQLITE_DELETE_BATCH_SIZE):
+        placeholders = ",".join("?" for _ in chunk)
+        connection.execute(
+            f"DELETE FROM {table_name} WHERE source_url IN ({placeholders})",
+            chunk,
+        )
+
+
+def _chunks(values: list[T], size: int) -> Iterator[list[T]]:
+    for index in range(0, len(values), size):
+        yield values[index : index + size]
 
 
 def fetch_analysis_results(db_path: Path | None = None) -> list[sqlite3.Row]:

@@ -1,0 +1,8 @@
+URL: https://kwork.ru/categories/audio-video
+Причина: Страница категории Kwork открылась, но карточки услуг не найдены
+Длина HTML: 124222
+Ссылок /kwork/: 0
+script-тегов: 58
+price-like текстов: 2
+SmartCaptcha: нет
+KWORK_COOKIE: задан

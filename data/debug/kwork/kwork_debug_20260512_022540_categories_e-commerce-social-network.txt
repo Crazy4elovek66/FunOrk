@@ -1,0 +1,8 @@
+URL: https://kwork.ru/categories/e-commerce-social-network
+Причина: Страница категории Kwork открылась, но карточки услуг не найдены
+Длина HTML: 828835
+Ссылок /kwork/: 0
+script-тегов: 68
+price-like текстов: 41
+SmartCaptcha: нет
+KWORK_COOKIE: задан

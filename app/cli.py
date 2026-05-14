@@ -8,7 +8,7 @@ import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import TypedDict
+from typing import Callable, TypedDict
 
 from app.analyzers.kwork_mapper import map_to_kwork
 from app.analyzers.kwork_matcher import (
@@ -19,7 +19,7 @@ from app.analyzers.kwork_matcher import (
 )
 from app.analyzers.opportunity_scorer import score_opportunity
 from app.analyzers.risk_classifier import analyze_risk
-from app.collectors.funpay import collect_catalog as collect_funpay_catalog
+from app.collectors.funpay import collect_catalog_entries as collect_funpay_catalog_entries
 from app.collectors.funpay import parse_category
 from app.collectors.http_client import AntiBanError, HttpClientError
 from app.collectors.kwork import collect_catalog as collect_kwork_catalog
@@ -35,6 +35,7 @@ from app.db import (
     save_run_history,
     save_scraped_item,
 )
+from app.filters.funpay_games import is_game_related_category, is_game_related_item
 from app.importers import import_funpay_file, import_kwork_file
 from app.models import (
     AnalysisResult,
@@ -50,6 +51,7 @@ from app.reports.export_xlsx import export_to_xlsx
 
 
 logger = logging.getLogger(__name__)
+ProgressCallback = Callable[[int, int, str], None]
 
 
 class PipelineSummary(TypedDict):
@@ -71,22 +73,61 @@ def run_pipeline(category_url: str) -> PipelineSummary:
     return _save_and_analyze_items(scraped_items)
 
 
-def collect_funpay(force: bool = False) -> int:
+def collect_funpay(
+    force: bool = False,
+    progress_callback: ProgressCallback | None = None,
+) -> int:
     init_db()
-    urls = collect_funpay_catalog(force=force, limit=config.MAX_PAGES_PER_RUN)
+    _report_progress(progress_callback, 1, 100, "Собираю список категорий FunPay...")
+    collected_entries = collect_funpay_catalog_entries(force=force, limit=config.MAX_PAGES_PER_RUN)
+    entries = [
+        entry
+        for entry in collected_entries
+        if not is_game_related_category(name=entry.name, text=entry.text, url=entry.url)
+    ]
+    skipped_categories = len(collected_entries) - len(entries)
+    if skipped_categories:
+        _report_progress(
+            progress_callback,
+            1,
+            100,
+            f"Игровые категории FunPay пропущены: {skipped_categories}.",
+        )
+    total_urls = max(1, len(entries))
     saved = 0
-    for url in urls:
+    skipped_game_items = 0
+    for index, entry in enumerate(entries, start=1):
+        url = entry.url
+        _report_progress(
+            progress_callback,
+            index,
+            total_urls,
+            f"Обрабатываю категорию FunPay {index}/{total_urls}: {entry.name}",
+        )
         category = FunPayCategory(
-            category_name=url.rstrip("/").split("/")[-1] or "FunPay",
+            category_name=entry.name,
             url=url,
             parse_status="pending",
         )
         save_funpay_category(category)
         try:
-            items = parse_category(url, force=force)
+            items = parse_category(
+                url,
+                force=force,
+                category_name=entry.name,
+                progress_callback=lambda page, pages, message, category_index=index: _report_progress(
+                    progress_callback,
+                    ((category_index - 1) * max(1, config.MAX_PAGES_PER_RUN)) + page,
+                    total_urls * max(1, config.MAX_PAGES_PER_RUN),
+                    message,
+                ),
+            )
         except (AntiBanError, HttpClientError) as error:
             items = [_failed_scraped_item(url, str(error))]
         for item in items:
+            if is_game_related_item(item):
+                skipped_game_items += 1
+                continue
             save_scraped_item(item)
             if item.parse_status != "success" and item.parse_error:
                 save_parse_error(
@@ -98,6 +139,16 @@ def collect_funpay(force: bool = False) -> int:
                     )
                 )
             saved += 1
+        _report_progress(
+            progress_callback,
+            index,
+            total_urls,
+            (
+                f"Сохранено лотов: {saved}. "
+                f"Игровых товаров пропущено: {skipped_game_items}. "
+                f"Завершена категория {index}/{total_urls}."
+            ),
+        )
     return saved
 
 
@@ -133,16 +184,25 @@ def collect_kwork(force: bool = False) -> int:
     return len(categories)
 
 
-def analyze_saved_items() -> int:
+def analyze_saved_items(progress_callback: ProgressCallback | None = None) -> int:
     init_db()
     analyzed = 0
+    _report_progress(progress_callback, 1, 100, "Загружаю индекс Kwork для сравнения...")
     kwork_index = build_kwork_index(load_kwork_services())
-    for row in fetch_scraped_items():
+    rows = [
+        row
+        for row in fetch_scraped_items()
+        if row["source"] == "funpay" and row["parse_status"] == "success"
+    ]
+    total_rows = max(1, len(rows))
+    for index, row in enumerate(rows, start=1):
+        _report_progress(
+            progress_callback,
+            index,
+            total_rows,
+            f"Анализирую лот FunPay {index}/{total_rows}: {row['title']}",
+        )
         item = _scraped_item_from_row(row)
-        if item.source != "funpay":
-            continue
-        if item.parse_status != "success":
-            continue
         opportunity = _analyze_item(item, kwork_index)
         _save_opportunity_compat(opportunity)
         save_analysis_result(_analysis_result_from_opportunity(item.id or 0, opportunity))
@@ -201,6 +261,16 @@ def _save_and_analyze_items(scraped_items: list[ScrapedItem]) -> PipelineSummary
         summary["analyzed"] += 1
 
     return summary
+
+
+def _report_progress(
+    progress_callback: ProgressCallback | None,
+    current: int,
+    total: int,
+    message: str,
+) -> None:
+    if progress_callback is not None:
+        progress_callback(current, total, message)
 
 
 def _analyze_item(

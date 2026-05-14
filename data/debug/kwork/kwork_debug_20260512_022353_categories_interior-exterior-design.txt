@@ -1,0 +1,8 @@
+URL: https://kwork.ru/categories/interior-exterior-design
+Причина: Страница категории Kwork открылась, но карточки услуг не найдены
+Длина HTML: 1202859
+Ссылок /kwork/: 0
+script-тегов: 68
+price-like текстов: 17
+SmartCaptcha: нет
+KWORK_COOKIE: задан

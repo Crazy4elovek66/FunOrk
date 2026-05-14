@@ -1,0 +1,8 @@
+URL: https://kwork.ru/categories/traffic
+Причина: найдена SmartCaptcha
+Длина HTML: 250557
+Ссылок /kwork/: 0
+script-тегов: 68
+price-like текстов: 17
+SmartCaptcha: да
+KWORK_COOKIE: задан

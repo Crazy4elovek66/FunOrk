@@ -1,0 +1,8 @@
+URL: https://kwork.ru/categories/e-commerce-social-network
+Причина: найдена SmartCaptcha
+Длина HTML: 826483
+Ссылок /kwork/: 0
+script-тегов: 68
+price-like текстов: 41
+SmartCaptcha: да
+KWORK_COOKIE: задан

@@ -1,0 +1,8 @@
+URL: https://kwork.ru/categories/integrated-promotion
+Причина: найдена SmartCaptcha
+Длина HTML: 190316
+Ссылок /kwork/: 0
+script-тегов: 68
+price-like текстов: 17
+SmartCaptcha: да
+KWORK_COOKIE: задан

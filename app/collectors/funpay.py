@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from typing import Callable
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup, Tag
@@ -19,8 +21,33 @@ from app.selectors.funpay_selectors import (
     REQUIRED_SELECTORS,
 )
 
+ProgressCallback = Callable[[int, int, str], None]
 
-def parse_category(url: str, *, force: bool = False) -> list[ScrapedItem]:
+
+@dataclass(frozen=True)
+class FunPayCatalogEntry:
+    url: str
+    name: str
+    text: str
+    category_id: str | None = None
+    group_id: str | None = None
+
+
+@dataclass(frozen=True)
+class FunPayCatalogIdGroup:
+    name: str
+    text: str
+    category_ids: tuple[str, ...]
+    group_id: str | None = None
+
+
+def parse_category(
+    url: str,
+    *,
+    force: bool = False,
+    category_name: str | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> list[ScrapedItem]:
     """Загружает категорию FunPay и возвращает структурированные лоты."""
 
     client = HttpClient()
@@ -31,11 +58,17 @@ def parse_category(url: str, *, force: bool = False) -> list[ScrapedItem]:
     items: list[ScrapedItem] = []
 
     try:
-        for _ in range(max_pages):
+        for page_number in range(1, max_pages + 1):
             normalized_page_url = _normalize_url(current_url)
             if normalized_page_url in seen_pages:
                 break
             seen_pages.add(normalized_page_url)
+            _report_progress(
+                progress_callback,
+                page_number,
+                max_pages,
+                f"Читаю страницу FunPay {page_number}/{max_pages}: {current_url}",
+            )
 
             html = client.get_html(current_url, source="funpay", force=force)
             soup = BeautifulSoup(html, "html.parser")
@@ -45,7 +78,7 @@ def parse_category(url: str, *, force: bool = False) -> list[ScrapedItem]:
                     return [_failed_item(current_url, "parse_failed", selector_error)]
                 break
 
-            items.extend(_parse_items_from_page(soup, current_url, seen_items))
+            items.extend(_parse_items_from_page(soup, current_url, seen_items, category_name))
 
             next_url = _find_next_page_url(soup, current_url, seen_pages)
             if not next_url:
@@ -74,6 +107,7 @@ def _parse_items_from_page(
     soup: BeautifulSoup,
     page_url: str,
     seen_items: set[str],
+    category_name: str | None = None,
 ) -> list[ScrapedItem]:
     items: list[ScrapedItem] = []
     for row in soup.select(LOTS_SELECTORS["lot_row"]):
@@ -82,7 +116,7 @@ def _parse_items_from_page(
         if _is_pagination_link(row):
             continue
 
-        item = _parse_lot_row(row, page_url)
+        item = _parse_lot_row(row, page_url, category_name=category_name)
         if item is None:
             continue
 
@@ -119,7 +153,12 @@ def _validate_required_selectors(soup: BeautifulSoup) -> str | None:
     return None
 
 
-def _parse_lot_row(row: Tag, category_url: str) -> ScrapedItem | None:
+def _parse_lot_row(
+    row: Tag,
+    category_url: str,
+    *,
+    category_name: str | None = None,
+) -> ScrapedItem | None:
     href = row.get("href")
     if not href:
         link = row.select_one("a[href]")
@@ -139,6 +178,8 @@ def _parse_lot_row(row: Tag, category_url: str) -> ScrapedItem | None:
     description = _extract_text(row, LOTS_SELECTORS.get("lot_delivery", ""))
     features = _detect_features(row, title, description)
 
+    category_id = extract_lots_category_id(lot_url) or extract_lots_category_id(category_url)
+
     return ScrapedItem(
         source="funpay",
         url=lot_url,
@@ -146,7 +187,8 @@ def _parse_lot_row(row: Tag, category_url: str) -> ScrapedItem | None:
         price=price,
         currency=currency,
         description=description,
-        category=_extract_category_name(row, category_url),
+        category=category_name or _extract_category_name(row, category_url),
+        category_id=category_id,
         subcategory=subcategory,
         requires_login_password=features["requires_login_password"],
         can_be_done_by_id=features["can_be_done_by_id"],
@@ -165,22 +207,208 @@ def collect_catalog(
 ) -> list[str]:
     """Собирает ссылки на публичные категории FunPay с главной страницы."""
 
+    return [entry.url for entry in collect_catalog_entries(base_url, force=force, limit=limit)]
+
+
+def collect_catalog_entries(
+    base_url: str = BASE_URL,
+    *,
+    force: bool = False,
+    limit: int = 100,
+) -> list[FunPayCatalogEntry]:
+    """Собирает категории FunPay вместе с текстом карточки на главной странице."""
+
     html = HttpClient().get_html(base_url, source="funpay", force=force)
     soup = BeautifulSoup(html, "html.parser")
-    urls: list[str] = []
+    entries: list[FunPayCatalogEntry] = []
     seen: set[str] = set()
+
+    title_blocks = [block for block in soup.select(".game-title") if isinstance(block, Tag)]
+    if title_blocks:
+        for block in title_blocks:
+            link = block.select_one("a[href]")
+            if not isinstance(link, Tag):
+                continue
+            entry = _catalog_entry_from_link(link, seen, group_id=_normalize_optional(block.get("data-id")))
+            if entry is None:
+                continue
+            entries.append(entry)
+            if len(entries) >= limit:
+                break
+        return entries
+
     for link in soup.select("a[href]"):
-        href = link.get("href")
-        if not href:
+        if not isinstance(link, Tag):
             continue
-        url = urljoin(BASE_URL, str(href))
-        if "/lots/" not in url or url in seen:
+        entry = _catalog_entry_from_link(link, seen, group_id=None)
+        if entry is None:
             continue
-        seen.add(url)
-        urls.append(url)
-        if len(urls) >= limit:
+        entries.append(entry)
+        if len(entries) >= limit:
             break
-    return urls
+    return entries
+
+
+def collect_catalog_id_groups(
+    base_url: str = BASE_URL,
+    *,
+    force: bool = False,
+    limit: int = 10000,
+) -> list[FunPayCatalogIdGroup]:
+    """Собирает основные и вложенные ID /lots/ для каждой игры FunPay."""
+
+    html = HttpClient().get_html(base_url, source="funpay", force=force)
+    soup = BeautifulSoup(html, "html.parser")
+    groups: list[FunPayCatalogIdGroup] = []
+    seen_group_names: set[str] = set()
+
+    title_blocks = [block for block in soup.select(".game-title") if isinstance(block, Tag)]
+    if not title_blocks:
+        entries = collect_catalog_entries(base_url, force=force, limit=limit)
+        return [
+            FunPayCatalogIdGroup(
+                name=entry.name,
+                text=entry.text,
+                category_ids=(entry.category_id,),
+                group_id=entry.group_id,
+            )
+            for entry in entries
+            if entry.category_id
+        ]
+
+    for block in title_blocks:
+        root_link = block.select_one("a[href]")
+        if not isinstance(root_link, Tag):
+            continue
+
+        root_entry = _catalog_entry_from_link(root_link, set(), group_id=_normalize_optional(block.get("data-id")))
+        if root_entry is None or not root_entry.category_id:
+            continue
+
+        match_key = _normalize_spaces(root_entry.name).casefold()
+        if match_key in seen_group_names:
+            continue
+        seen_group_names.add(match_key)
+
+        links = _collect_group_lot_links(block)
+        ids: list[str] = []
+        text_parts = [root_entry.name, root_entry.text]
+        for link in links:
+            entry = _catalog_entry_from_link(link, set(), group_id=root_entry.group_id)
+            if entry is None or not entry.category_id:
+                continue
+            if entry.category_id not in ids:
+                ids.append(entry.category_id)
+            if entry.text:
+                text_parts.append(entry.text)
+
+        if root_entry.category_id not in ids:
+            ids.insert(0, root_entry.category_id)
+
+        groups.append(
+            FunPayCatalogIdGroup(
+                name=root_entry.name,
+                text=_normalize_spaces(" ".join(text_parts)),
+                category_ids=tuple(ids),
+                group_id=root_entry.group_id,
+            )
+        )
+        if len(groups) >= limit:
+            break
+
+    return groups
+
+
+def _collect_group_lot_links(title_block: Tag) -> list[Tag]:
+    links: list[Tag] = []
+    seen_urls: set[str] = set()
+
+    def add_links(container: Tag) -> None:
+        for link in container.select("a[href]"):
+            if not isinstance(link, Tag):
+                continue
+            href = str(link.get("href") or "")
+            url = urljoin(BASE_URL, href)
+            if "/lots/" not in url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            links.append(link)
+
+    add_links(title_block)
+
+    parent = title_block.parent
+    if isinstance(parent, Tag) and len(parent.select(".game-title")) == 1:
+        add_links(parent)
+        return links
+
+    for sibling in title_block.next_siblings:
+        if not isinstance(sibling, Tag):
+            continue
+        if "game-title" in sibling.get("class", []) or sibling.select_one(".game-title"):
+            break
+        add_links(sibling)
+
+    return links
+
+
+def _catalog_entry_from_link(
+    link: Tag,
+    seen: set[str],
+    *,
+    group_id: str | None,
+) -> FunPayCatalogEntry | None:
+    href = link.get("href")
+    if not href:
+        return None
+    url = urljoin(BASE_URL, str(href))
+    if "/lots/" not in url or url in seen:
+        return None
+    seen.add(url)
+    text = _normalize_spaces(link.get_text(" ", strip=True))
+    return FunPayCatalogEntry(
+        url=url,
+        name=_extract_catalog_name(link, text, url),
+        text=text,
+        category_id=extract_lots_category_id(url),
+        group_id=group_id,
+    )
+
+
+def _normalize_optional(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = _normalize_spaces(str(value))
+    return normalized or None
+
+
+def _extract_catalog_name(link: Tag, text: str, url: str) -> str:
+    if link.parent and isinstance(link.parent, Tag) and "game-title" in link.parent.get("class", []):
+        link_text = _normalize_spaces(link.get_text(" ", strip=True))
+        if link_text:
+            return link_text
+    for selector in (".game-title", ".media-user-name", ".inside", "span", "div"):
+        candidate = _extract_text(link, selector)
+        if candidate:
+            return candidate
+    if text:
+        return text.split(" ", 1)[0] if "\n" not in text else text.splitlines()[0]
+    slug = url.rstrip("/").split("/")[-1]
+    return slug or "FunPay"
+
+
+def extract_lots_category_id(url: str) -> str | None:
+    match = re.search(r"/lots/(\d+)/?", urlsplit(url).path)
+    return match.group(1) if match else None
+
+
+def _report_progress(
+    progress_callback: ProgressCallback | None,
+    current: int,
+    total: int,
+    message: str,
+) -> None:
+    if progress_callback is not None:
+        progress_callback(current, total, message)
 
 
 def _split_title_subcategory(title: str) -> tuple[str, str | None]:
@@ -197,7 +425,7 @@ def _split_title_subcategory(title: str) -> tuple[str, str | None]:
 
 def _extract_category_name(row: Tag, category_url: str) -> str:
     candidates: list[str] = []
-    for selector in (".tc-server", ".tc-game", ".game-title", ".breadcrumb a", ".breadcrumbs a"):
+    for selector in (".tc-game", ".game-title", ".breadcrumb a", ".breadcrumbs a"):
         text = _extract_text(row, selector)
         if text:
             candidates.append(text)
@@ -206,7 +434,7 @@ def _extract_category_name(row: Tag, category_url: str) -> str:
         if cleaned and not _looks_like_price(cleaned):
             return cleaned
     slug = category_url.rstrip("/").split("/")[-1]
-    return f"FunPay {slug}" if slug else "FunPay"
+    return f"FunPay {slug}" if slug and not slug.isdigit() else "FunPay"
 
 
 def _detect_features(row: Tag, title: str, description: str | None) -> dict[str, bool]:

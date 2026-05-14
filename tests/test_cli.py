@@ -1,6 +1,14 @@
 import pytest
+from unittest.mock import ANY
 
 import app.cli as cli
+from app.collectors.funpay import FunPayCatalogEntry
+from app.filters.funpay_games import (
+    active_stop_categories,
+    classify_game_category_reasons,
+    is_game_related_category,
+    is_game_related_item,
+)
 from app.cli import run_pipeline
 from app.models import KworkCategory, ScrapedItem
 
@@ -99,6 +107,153 @@ def test_collect_kwork_saves_categories_and_items(mocker):
     )
     save_kwork_category_mock.assert_called_once_with(category)
     save_scraped_item_mock.assert_called_once_with(item)
+
+
+def test_collect_funpay_skips_game_related_goods(mocker):
+    game_item = ScrapedItem(
+        source="funpay",
+        url="https://funpay.com/lots/roblox/1",
+        title="Roblox робуксы",
+        category="Roblox",
+        parse_status="success",
+    )
+    service_item = ScrapedItem(
+        source="funpay",
+        url="https://funpay.com/lots/services/1",
+        title="Настройка описания",
+        category="Цифровые услуги",
+        parse_status="success",
+    )
+
+    mocker.patch("app.cli.init_db")
+    mocker.patch(
+        "app.cli.collect_funpay_catalog_entries",
+        return_value=[
+            FunPayCatalogEntry(
+                url="https://funpay.com/lots/roblox/",
+                name="Roblox",
+                text="Roblox Робуксы Аккаунты Скины Донат",
+            ),
+            FunPayCatalogEntry(
+                url="https://funpay.com/lots/services/",
+                name="ChatGPT",
+                text="ChatGPT Аккаунты Подписка Услуги",
+            ),
+        ],
+    )
+    parse_category_mock = mocker.patch(
+        "app.cli.parse_category",
+        return_value=[game_item, service_item],
+    )
+    save_funpay_category_mock = mocker.patch("app.cli.save_funpay_category")
+    save_scraped_item_mock = mocker.patch("app.cli.save_scraped_item")
+
+    saved = cli.collect_funpay(force=True)
+
+    assert saved == 1
+    parse_category_mock.assert_called_once_with(
+        "https://funpay.com/lots/services/",
+        force=True,
+        category_name="ChatGPT",
+        progress_callback=ANY,
+    )
+    save_funpay_category_mock.assert_called_once()
+    save_scraped_item_mock.assert_called_once_with(service_item)
+
+
+def test_funpay_game_filter_keeps_ai_and_blocks_game_categories():
+    assert not is_game_related_category(
+        name="ChatGPT",
+        text="ChatGPT Аккаунты Подписка Прочее",
+        url="https://funpay.com/lots/chatgpt/",
+    )
+    assert not is_game_related_category(
+        name="Gemini",
+        text="Gemini Аккаунты Услуги Подписка",
+        url="https://funpay.com/lots/gemini/",
+    )
+    assert is_game_related_category(
+        name="Roblox",
+        text="Roblox Робуксы Подарочные карты Донат Аккаунты Скины",
+        url="https://funpay.com/lots/roblox/",
+    )
+    assert is_game_related_category(
+        name="Blum",
+        text="Blum Рефералы Услуги Прочее",
+        url="https://funpay.com/lots/blum/",
+    )
+    assert is_game_related_category(
+        name="Counter-Strike 2",
+        text="Counter-Strike 2 Аккаунты Prime Скины Кейсы Буст Обучение",
+        url="https://funpay.com/lots/cs2/",
+    )
+
+
+def test_funpay_game_filter_skips_telegram_games_but_keeps_subscription():
+    game_item = ScrapedItem(
+        source="funpay",
+        url="https://funpay.com/lots/telegram/1",
+        title="Telegram Игры",
+        category="Telegram",
+        subcategory="Игры",
+    )
+    subscription_item = ScrapedItem(
+        source="funpay",
+        url="https://funpay.com/lots/chatgpt/1",
+        title="ChatGPT подписка",
+        category="ChatGPT",
+        subcategory="Подписка",
+    )
+
+    assert is_game_related_item(game_item)
+    assert not is_game_related_item(subscription_item)
+
+
+def test_previous_game_markers_are_visible_in_stop_categories():
+    stop_categories = set(active_stop_categories())
+
+    assert {"CS2", "CSGO", "Dota", "Dota2", "WOT"}.issubset(stop_categories)
+    assert {"Скины", "Робуксы", "Игровая валюта", "Twitch Drops"}.issubset(stop_categories)
+
+
+def test_funpay_game_filter_blocks_category_by_lots_id(monkeypatch):
+    monkeypatch.setattr(
+        "app.filters.funpay_games.load_funpay_stop_categories",
+        lambda: {
+            "enabled": True,
+            "categories": [],
+            "disabled_categories": [],
+            "category_ids": {"Roblox": "130"},
+        },
+    )
+
+    reasons = classify_game_category_reasons(
+        name="Неизвестная категория",
+        text="",
+        url="https://funpay.com/lots/130/",
+    )
+
+    assert reasons == ["стоп-ID категории FunPay"]
+
+
+def test_funpay_game_filter_blocks_nested_category_ids(monkeypatch):
+    monkeypatch.setattr(
+        "app.filters.funpay_games.load_funpay_stop_categories",
+        lambda: {
+            "enabled": True,
+            "categories": [],
+            "disabled_categories": [],
+            "category_ids": {"Age of Mythology: Retold": ["2725", "2726", "2727"]},
+        },
+    )
+
+    reasons = classify_game_category_reasons(
+        name="Ключи",
+        text="",
+        url="https://funpay.com/lots/2727/",
+    )
+
+    assert reasons == ["стоп-ID категории FunPay"]
 
 
 def test_main_errors_without_url_or_export(mocker):

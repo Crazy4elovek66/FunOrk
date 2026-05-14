@@ -1,0 +1,8 @@
+URL: https://kwork.ru/categories/server-administration
+Причина: найдена SmartCaptcha
+Длина HTML: 205036
+Ссылок /kwork/: 0
+script-тегов: 68
+price-like текстов: 17
+SmartCaptcha: да
+KWORK_COOKIE: задан

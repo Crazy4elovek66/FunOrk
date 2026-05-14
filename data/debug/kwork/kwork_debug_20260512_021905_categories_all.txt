@@ -1,0 +1,8 @@
+URL: https://kwork.ru/categories/all
+Причина: Страница категории Kwork открылась, но карточки услуг не найдены
+Длина HTML: 252797
+Ссылок /kwork/: 0
+script-тегов: 68
+price-like текстов: 1
+SmartCaptcha: нет
+KWORK_COOKIE: задан

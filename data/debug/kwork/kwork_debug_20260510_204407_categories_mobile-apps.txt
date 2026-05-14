@@ -1,0 +1,8 @@
+URL: https://kwork.ru/categories/mobile-apps
+Причина: найдена SmartCaptcha
+Длина HTML: 754404
+Ссылок /kwork/: 0
+script-тегов: 68
+price-like текстов: 17
+SmartCaptcha: да
+KWORK_COOKIE: задан
